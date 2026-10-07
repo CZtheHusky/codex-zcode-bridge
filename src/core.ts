@@ -1,5 +1,7 @@
 // Supported composition surface for calling hosts. Do not import internal files.
 export * from "./interfaces.js";
+export { buildTaskFeedbackSnapshotV01 } from "./feedback/task-feedback.js";
+export { renderTaskFeedback } from "./feedback/renderer.js";
 export { codexHostProfile, validateHostProfile, type BridgeHostProfile } from "./host/profile.js";
 export { TaskStore } from "./store/task-store.js";
 export { BridgeTaskManager, type TaskManagerOptions } from "./manager/task-manager.js";

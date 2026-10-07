@@ -37,6 +37,10 @@ export const taskIdOnlyInputSchema = z.strictObject({
   task_id: z.string().min(1),
 });
 
+export const zcodeFeedbackInputSchema = z.strictObject({
+  task_id: taskIdSchema,
+});
+
 export const zcodeContinueInputSchema = z.strictObject({
   task_id: z.string().min(1),
   feedback: z.string().min(1),
@@ -145,6 +149,41 @@ export const taskProgressPageSchema = z.object({
   next_seq: z.number().int().nonnegative(),
   has_more: z.boolean(),
   omitted_events: z.number().int().nonnegative().optional(),
+});
+
+export const taskFeedbackSnapshotV01Schema = z.strictObject({
+  schema_version: z.literal("0.1"),
+  task_id: z.string(),
+  attempt: z.number().int(),
+  status: z.enum(["queued", "running", "completed", "failed", "cancelled", "waiting_for_master"]),
+  model: z.strictObject({
+    provider_id: z.string().nullable(),
+    model_id: z.string().nullable(),
+    reasoning_level: z.string().nullable(),
+    source: z.literal("runtime"),
+  }).nullable(),
+  phase: z.null(),
+  progress: z.null(),
+  activity: z.strictObject({
+    kind: z.enum(["tool_call", "tool_update"]),
+    summary: z.string(),
+    observed_at: z.string(),
+    currentness: z.literal("last_observed"),
+  }).nullable(),
+  interaction: z.strictObject({
+    state: z.enum(["not_observed", "pending", "answered"]),
+    kind: z.enum(["permission", "user_input"]).nullable(),
+  }).nullable(),
+  result: z.strictObject({
+    source: z.literal("agent_report"),
+    summary: z.string(),
+    issues: stringArray,
+    files_changed: stringArray,
+    tests: z.array(testReportSchema),
+    started_at: z.string().nullable(),
+    finished_at: z.string().nullable(),
+    duration_ms: z.number().int().nonnegative().nullable(),
+  }).nullable(),
 });
 
 export const toolErrorSchema = z.object({

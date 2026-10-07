@@ -1,0 +1,146 @@
+{
+  "evidence_kind": "sanitized runtime probe summary",
+  "observed_at": "2026-10-05",
+  "runtime_version": "0.16.9",
+  "bridge_commit": "2596759198fa826c2b7ac0478c5682da996e9727",
+  "os": "Windows",
+  "node_version": "v24.16.0",
+  "provider_id": "account:bigmodel-individual-coding-plan",
+  "model_id": "GLM-5.3",
+  "reasoning_level": "max",
+  "rpc_probes": {
+    "runtime/capabilities": {
+      "ok": true,
+      "returned": {
+        "independentPlanState": true
+      }
+    },
+    "session/create": {
+      "ok": true,
+      "snapshot_groups": [
+        "messages",
+        "projection",
+        "protocol",
+        "runtime",
+        "session",
+        "settings",
+        "slashCommands",
+        "todoGroups",
+        "todos"
+      ],
+      "session_fields": [
+        "createdAt",
+        "mode",
+        "model",
+        "sessionId",
+        "sessionKind",
+        "status",
+        "target",
+        "title",
+        "traceId",
+        "updatedAt",
+        "workspace"
+      ],
+      "runtime_fields": [
+        "eventSeq",
+        "goalVerificationTimeline",
+        "goalVerifications",
+        "pendingRequestIds",
+        "stateRevision"
+      ],
+      "settings_fields": [
+        "mode",
+        "model",
+        "permission",
+        "thoughtLevel"
+      ]
+    },
+    "session/read_same_process": {
+      "ok": true,
+      "status_after_completion": "idle",
+      "event_seq_after_completion": 261,
+      "pending_request_count_after_completion": 0
+    },
+    "session/events_same_process": {
+      "ok": true,
+      "after_seq_and_limit": "accepted"
+    },
+    "session/subagents_empty_session": {
+      "ok": false,
+      "error_code": -32004,
+      "interpretation": "no subagent data from this empty-session probe; not proof of unsupported capability"
+    },
+    "session/list": {
+      "ok": true,
+      "returned_entries": 50
+    }
+  },
+  "normal_task": {
+    "scope": "asked runtime to create and verify one line in a temporary isolated workspace",
+    "send_accepted": true,
+    "host_side_artifact_check": {
+      "file": "probe.txt",
+      "exists_after_run": false,
+      "interpretation": "runtime turn success did not establish objective satisfaction"
+    },
+    "terminal_event": {
+      "type": "turn.completed",
+      "sequence": 261,
+      "resultType": "success"
+    },
+    "live_event_count": 261,
+    "event_counts": {
+      "session.titleUpdated": 1,
+      "turn.started": 1,
+      "session.updated": 36,
+      "model.streaming": 177,
+      "tool.updated": 26,
+      "permission.requested": 5,
+      "permission.resolved": 5,
+      "streamRecovery.updated": 9,
+      "turn.completed": 1
+    },
+    "observed_model_stream_kinds": [
+      "reasoning_delta",
+      "text_delta",
+      "tool_input_start",
+      "tool_input_delta",
+      "tool_input_end",
+      "tool_call"
+    ],
+    "observed_tool_name_example": "Write",
+    "tool_call_count_from_terminal_metadata": 9,
+    "permission_human_roundtrip": false,
+    "user_input_request": false,
+    "phase_or_progress_event": false,
+    "failure_or_cancellation_path": false,
+    "retry_semantics_established": false
+  },
+  "reconnect_probe": {
+    "kind": "new idle session in unique temporary workspace",
+    "initial_status": "idle",
+    "initial_event_seq": 0,
+    "session_read_after_process_restart": {
+      "ok": false,
+      "error_code": -32004
+    },
+    "session_events_after_process_restart": {
+      "ok": false,
+      "error_code": -32004
+    },
+    "session_list_found_exact_session": false,
+    "session_resume_exact_session": {
+      "ok": false,
+      "error_code": -32004
+    },
+    "active_or_completed_task_recovery_tested": false
+  },
+  "privacy": {
+    "model_text_saved": false,
+    "reasoning_text_saved": false,
+    "tool_arguments_saved": false,
+    "headers_or_credentials_saved": false,
+    "raw_rpc_dump_saved": false
+  },
+  "caveat": "Single runtime version, provider/model path, successful task, and empty-session reconnect attempt; not a compatibility guarantee."
+}

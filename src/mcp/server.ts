@@ -16,6 +16,7 @@ import type {
   TaskReceipt,
   TaskResult,
   TaskStatusRecord,
+  TaskFeedbackSnapshotV01,
   ZCodeInteractionReplyInput,
 } from "../interfaces.js";
 import { TaskManagerError } from "../manager/errors.js";
@@ -34,16 +35,19 @@ import {
   zcodeDefaultModelInputSchema,
   modelCatalogSchema,
   defaultModelSchema,
+  taskFeedbackSnapshotV01Schema,
+  zcodeFeedbackInputSchema,
 } from "./schemas.js";
 import type { DoctorReport } from "../runtime/doctor.js";
 import { BridgeError } from "../runtime/errors.js";
 import type { ZCodeModelSettings } from "../runtime/model-settings.js";
+import { renderTaskFeedback } from "../feedback/renderer.js";
 
 export const SERVER_NAME = "codex-zcode-bridge";
 export const SERVER_VERSION = "1.0.5"; // x-release-please-version
 
 export interface BridgeServerOptions {
-  taskManager: TaskManager & Partial<Pick<ProgressTaskManager, "getEvents" | "replyToInteraction">>;
+  taskManager: TaskManager & Partial<Pick<ProgressTaskManager, "getEvents" | "getFeedback" | "replyToInteraction">>;
   doctor?: () => Promise<DoctorReport>;
   modelSettings?: Pick<ZCodeModelSettings, "listModels" | "getDefaultModel" | "setDefaultModel" | "clearDefaultModel">;
   serverInfo?: { name: string; version: string };
@@ -66,6 +70,13 @@ function errorResult(code: string, message: string): CallToolResult {
     isError: true,
     content: [{ type: "text", text: `${code}: ${message}` }],
     structuredContent: { error: { code, message } },
+  };
+}
+
+function feedbackResult(snapshot: TaskFeedbackSnapshotV01): CallToolResult {
+  return {
+    content: [{ type: "text", text: renderTaskFeedback(snapshot) }],
+    structuredContent: snapshot as unknown as Record<string, unknown>,
   };
 }
 
@@ -177,6 +188,28 @@ export function createBridgeServer(options: BridgeServerOptions): McpServer {
       outputSchema: taskStatusRecordSchema,
     },
     async (args: { task_id: string }) => runTool(() => manager.getStatus(args.task_id)),
+  );
+
+  server.registerTool(
+    "zcode_feedback",
+    {
+      title: "Read concise ZCode task feedback",
+      description: `Read a provenance-aware v0.1 snapshot for one task attempt. Bridge status, runtime-reported model/tool observations, and Agent-reported result claims remain distinct. phase/progress stay null; interaction remains not_observed without reliable current evidence. This snapshot does not replace zcode_events and does not verify or accept the result. ${EXECUTION_NOT_VERDICT}`,
+      inputSchema: zcodeFeedbackInputSchema,
+      outputSchema: taskFeedbackSnapshotV01Schema,
+    },
+    async (args: { task_id: string }) => {
+      const getFeedback = manager.getFeedback;
+      if (!getFeedback) return errorResult("FEEDBACK_UNAVAILABLE", "task manager does not provide feedback snapshots");
+      try {
+        const snapshot = await getFeedback.call(manager, args.task_id);
+        return feedbackResult(snapshot);
+      } catch (error) {
+        if (error instanceof TaskManagerError) return errorResult(error.code, error.message);
+        if (error instanceof BridgeError) return errorResult(error.code.toUpperCase(), error.message);
+        throw error;
+      }
+    },
   );
 
   server.registerTool(

@@ -19,6 +19,7 @@ import type {
   TaskReceipt,
   TaskResult,
   TaskStatusRecord,
+  TaskFeedbackSnapshotV01,
   ZCodeInteractionReplyInput,
 } from "../src/interfaces.js";
 import { SESSION_ID, makeTask } from "./helpers.js";
@@ -55,6 +56,18 @@ class FakeTaskManager implements TaskManager {
     started_at: CREATED_AT,
     finished_at: CREATED_AT,
   };
+  feedback: TaskFeedbackSnapshotV01 = {
+    schema_version: "0.1",
+    task_id: "task_1",
+    attempt: 1,
+    status: "running",
+    model: null,
+    phase: null,
+    progress: null,
+    activity: null,
+    interaction: { state: "not_observed", kind: null },
+    result: null,
+  };
   error: TaskManagerError | null = null;
 
   async createTask(task: TaskPackage): Promise<TaskReceipt> {
@@ -73,6 +86,12 @@ class FakeTaskManager implements TaskManager {
     this.calls.push({ method: "getResult", args: taskId });
     if (this.error) throw this.error;
     return { ...this.result, task_id: taskId };
+  }
+
+  async getFeedback(taskId: string): Promise<TaskFeedbackSnapshotV01> {
+    this.calls.push({ method: "getFeedback", args: taskId });
+    if (this.error) throw this.error;
+    return { ...this.feedback, task_id: taskId };
   }
 
   async continueTask(input: ContinueTaskInput): Promise<TaskReceipt> {
@@ -124,12 +143,12 @@ function fullTaskArguments(): Record<string, unknown> {
   };
 }
 
-test("the frozen tools and additive progress, interaction, and doctor tools are registered", async () => {
+test("the frozen tools and additive progress, feedback, interaction, and doctor tools are registered", async () => {
   await withServer(async (client) => {
     const { tools } = await client.listTools();
     assert.deepEqual(
       tools.map((tool) => tool.name).sort(),
-      ["zcode_cancel", "zcode_clear_default_model", "zcode_continue", "zcode_default_model", "zcode_doctor", "zcode_events", "zcode_interaction_reply", "zcode_model_catalog", "zcode_result", "zcode_set_default_model", "zcode_status", "zcode_task"],
+      ["zcode_cancel", "zcode_clear_default_model", "zcode_continue", "zcode_default_model", "zcode_doctor", "zcode_events", "zcode_feedback", "zcode_interaction_reply", "zcode_model_catalog", "zcode_result", "zcode_set_default_model", "zcode_status", "zcode_task"],
     );
     const task = tools.find((tool) => tool.name === "zcode_task")!;
     assert.match(task.description!, /calling host/);
@@ -277,6 +296,22 @@ test("zcode_status returns the TaskStatusRecord and maps the argument", async ()
     assert.equal(record.attempt, 1);
     assert.equal(record.worker_pid, 4242);
     assert.equal(manager.calls[0]!.method, "getStatus");
+    assert.equal(manager.calls[0]!.args, "task_1");
+  });
+});
+
+test("zcode_feedback returns the additive v0.1 snapshot", async () => {
+  await withServer(async (client, manager) => {
+    const result = (await client.callTool({
+      name: "zcode_feedback",
+      arguments: { task_id: "task_1" },
+    })) as CallToolResult;
+    assert.equal(result.isError, undefined);
+    assert.deepEqual(result.structuredContent, manager.feedback);
+    const rendered = result.content[0]!.type === "text" ? result.content[0]!.text : "";
+    assert.match(rendered, /ZCode · task_1/);
+    assert.match(rendered, /→ Running/);
+    assert.equal(manager.calls[0]!.method, "getFeedback");
     assert.equal(manager.calls[0]!.args, "task_1");
   });
 });

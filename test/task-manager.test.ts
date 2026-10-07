@@ -90,6 +90,42 @@ test("with a free slot the task starts immediately as running with a persisted p
   }
 });
 
+test("getFeedback aggregates allowlisted current-attempt events across event pages", async () => {
+  const fx = await freshFixture();
+  try {
+    await fx.manager.createTask(fx.makeTask());
+    const status = await fx.manager.getStatus("task_1");
+    const observedAt = new Date().toISOString();
+    for (let index = 0; index < 205; index += 1) {
+      fx.store.appendEvent("task_1", "model_output", "visible output must not enter snapshot", undefined, observedAt);
+    }
+    fx.store.appendEvent("task_1", "model_selected", "model selected", {
+      requested_model: "requested/model",
+      provider_id: "runtime-provider",
+      model_id: "runtime-model",
+      reasoning_level: "high",
+      reasoning_level_source: "runtime",
+    }, observedAt);
+    fx.store.appendEvent("task_1", "tool_status", "Write: running", {
+      tool_name: "Write",
+      state: "running",
+      arguments: { content: "private" },
+    }, observedAt);
+
+    const feedback = await fx.manager.getFeedback("task_1");
+    assert.equal(feedback.status, "running");
+    assert.equal(feedback.model?.model_id, "runtime-model");
+    assert.equal(feedback.activity?.kind, "tool_update");
+    assert.equal(feedback.activity?.summary, "Tool update · Write");
+    assert.equal(feedback.activity?.currentness, "last_observed");
+    assert.equal(feedback.result, null);
+    assert.doesNotMatch(JSON.stringify(feedback), /requested\/model|visible output|private/u);
+    assert.doesNotMatch(feedback.activity?.summary ?? "", /running/iu);
+  } finally {
+    await fx.cleanup();
+  }
+});
+
 test("status snapshot reads bypass the manager scheduling lock", async () => {
   const fx = await freshFixture();
   let release!: () => void;

@@ -5472,8 +5472,8 @@ function rewriteKeyNames(ctx) {
       bySchema.set(entry.schema, entry);
   }
   const rewrites = /* @__PURE__ */ new Map();
-  for (const record2 of pendingRecords.get(ctx) ?? []) {
-    const seen = ctx.seen.get(record2);
+  for (const record3 of pendingRecords.get(ctx) ?? []) {
+    const seen = ctx.seen.get(record3);
     const names = (seen?.def ?? seen?.schema)?.propertyNames;
     if (!names || names === true || rewrites.has(names))
       continue;
@@ -22455,30 +22455,30 @@ var TaskStore = class {
     const file = this.interactionFile(taskId, request.request_id);
     return withEventLock(path4.join(this.taskDir(taskId), "interactions.lock"), () => {
       if (existsSync2(file)) {
-        const record3 = this.#readJson(file);
-        if (record3.request_id !== request.request_id || record3.method !== request.method || stableJson(record3.params) !== stableJson(request.params)) {
+        const record4 = this.#readJson(file);
+        if (record4.request_id !== request.request_id || record4.method !== request.method || stableJson(record4.params) !== stableJson(request.params)) {
           throw new Error("interaction request id collision");
         }
-        return { record: record3, created: false };
+        return { record: record4, created: false };
       }
       if (Buffer.byteLength(JSON.stringify(request.params), "utf8") > 32e3) {
         throw new Error("ZCode interaction request exceeded the 32 KB persistence limit");
       }
-      const record2 = {
+      const record3 = {
         ...request,
         state: "pending",
         created_at: createdAt
       };
-      this.#writeJsonAtomic(file, record2);
-      return { record: record2, created: true };
+      this.#writeJsonAtomic(file, record3);
+      return { record: record3, created: true };
     });
   }
   readInteractionRequest(taskId, requestId) {
     const file = this.interactionFile(taskId, requestId);
     if (!existsSync2(file)) return null;
-    const record2 = this.#readJson(file);
-    if (record2.request_id !== requestId) throw new Error("interaction request id hash mismatch");
-    return record2;
+    const record3 = this.#readJson(file);
+    if (record3.request_id !== requestId) throw new Error("interaction request id hash mismatch");
+    return record3;
   }
   answerInteractionRequest(taskId, requestId, answer, answeredAt = (/* @__PURE__ */ new Date()).toISOString()) {
     const file = this.interactionFile(taskId, requestId);
@@ -22578,7 +22578,7 @@ function isTerminalStatus(status) {
   return status === "completed" || status === "failed" || status === "cancelled" || status === "waiting_for_master";
 }
 function toPublicStatus(status) {
-  const record2 = {
+  const record3 = {
     task_id: status.task_id,
     status: status.status,
     attempt: status.attempt,
@@ -22590,9 +22590,9 @@ function toPublicStatus(status) {
     zcode_session_id: status.zcode_session_id,
     exit_code: status.exit_code
   };
-  if (status.error_code) record2.error_code = status.error_code;
-  if (status.error) record2.error = status.error;
-  return record2;
+  if (status.error_code) record3.error_code = status.error_code;
+  if (status.error) record3.error = status.error;
+  return record3;
 }
 
 // src/workspace/direct-provider.ts
@@ -23094,6 +23094,90 @@ function joinBoundedPreservingTail(sections, requiredTail) {
   throw new Error(`task prompt exceeds ${MAX_PROMPT_CHARS} characters; shorten the task package without dropping constraints`);
 }
 
+// src/feedback/task-feedback.ts
+var EMPTY_INTERACTION = { state: "not_observed", kind: null };
+function record2(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
+}
+function safeRuntimeText(value) {
+  if (typeof value !== "string") return null;
+  const text = value.replace(/[\u0000-\u001f\u007f]/gu, " ").trim();
+  return text ? text.slice(0, 160) : null;
+}
+function safeToolName(value) {
+  if (typeof value !== "string") return "tool";
+  const name = value.replace(/[^A-Za-z0-9_.-]/gu, "").slice(0, 80);
+  return name || "tool";
+}
+function durationMs(startedAt, finishedAt) {
+  if (!startedAt || !finishedAt) return null;
+  const start = Date.parse(startedAt);
+  const finish = Date.parse(finishedAt);
+  if (!Number.isFinite(start) || !Number.isFinite(finish) || finish < start) return null;
+  return finish - start;
+}
+function buildTaskFeedbackSnapshotV01(input) {
+  let model = null;
+  let activity = null;
+  let agentReportReady = false;
+  for (const event of input.events) {
+    const details = record2(event.details);
+    if (event.type === "model_selected" && details) {
+      const providerId = safeRuntimeText(details["provider_id"]);
+      const modelId = safeRuntimeText(details["model_id"]);
+      if (providerId && modelId) {
+        model = {
+          provider_id: providerId,
+          model_id: modelId,
+          reasoning_level: details["reasoning_level_source"] === "runtime" ? safeRuntimeText(details["reasoning_level"]) : null,
+          source: "runtime"
+        };
+      }
+    } else if (event.type === "model_tool_call" && details) {
+      activity = {
+        kind: "tool_call",
+        summary: `Tool request \xB7 ${safeToolName(details["tool_name"])}`,
+        observed_at: event.at,
+        currentness: "last_observed"
+      };
+    } else if (event.type === "tool_status" && details) {
+      activity = {
+        kind: "tool_update",
+        // The normalized update state has not been validated as a current
+        // running/completed state; deliberately render only the observation.
+        summary: `Tool update \xB7 ${safeToolName(details["tool_name"])}`,
+        observed_at: event.at,
+        currentness: "last_observed"
+      };
+    } else if (event.type === "report_ready") {
+      agentReportReady = true;
+    }
+  }
+  const finalResult = input.result;
+  const result = agentReportReady && finalResult && finalResult.attempt === input.status.attempt && finalResult.status === input.status.status && (finalResult.status === "completed" || finalResult.status === "waiting_for_master") ? {
+    source: "agent_report",
+    summary: finalResult.summary,
+    issues: [...finalResult.issues],
+    files_changed: [...finalResult.files_changed],
+    tests: finalResult.tests.map((test) => ({ ...test })),
+    started_at: input.status.started_at,
+    finished_at: input.status.finished_at,
+    duration_ms: durationMs(input.status.started_at, input.status.finished_at)
+  } : null;
+  return {
+    schema_version: "0.1",
+    task_id: input.status.task_id,
+    attempt: input.status.attempt,
+    status: input.status.status,
+    model,
+    phase: null,
+    progress: null,
+    activity,
+    interaction: { ...EMPTY_INTERACTION },
+    result
+  };
+}
+
 // src/manager/task-manager.ts
 var BridgeTaskManager = class _BridgeTaskManager {
   /** How long a respawn claim counts as in-flight across Bridge processes. */
@@ -23299,6 +23383,36 @@ var BridgeTaskManager = class _BridgeTaskManager {
       await sleep3(Math.min(250, Math.max(1, deadline - Date.now())));
     }
   }
+  async getFeedback(taskId) {
+    this.#requireTask(taskId);
+    const status = this.#store.readStatus(taskId);
+    const startTime = status.started_at ? Date.parse(status.started_at) : Number.NaN;
+    const relevantTypes = /* @__PURE__ */ new Set(["model_selected", "model_tool_call", "tool_status", "report_ready", "worker_started"]);
+    const attemptEvents = [];
+    let afterSeq = 0;
+    while (true) {
+      const previousSeq = afterSeq;
+      const page = this.#store.readEvents(taskId, afterSeq, 200, "raw");
+      for (const event of page.events) {
+        const eventTime = Date.parse(event.at);
+        if (!Number.isFinite(startTime) || !Number.isFinite(eventTime) || eventTime < startTime) continue;
+        if (relevantTypes.has(event.type)) attemptEvents.push(event);
+      }
+      afterSeq = page.nextSeq;
+      if (!page.hasMore || page.nextSeq <= previousSeq) break;
+    }
+    let currentWorkerStarted = null;
+    for (const event of attemptEvents) {
+      if (event.type === "worker_started" && event.details?.["attempt"] === status.attempt) currentWorkerStarted = event;
+    }
+    const events = attemptEvents.filter((event) => {
+      if (event.type === "worker_started") return false;
+      if (!currentWorkerStarted) return true;
+      return event.seq > currentWorkerStarted.seq;
+    });
+    const result = isTerminalStatus(status.status) ? this.#store.readResult(taskId) : null;
+    return buildTaskFeedbackSnapshotV01({ status: toPublicStatus(status), events, result });
+  }
   async getResult(taskId) {
     return (async () => {
       this.#requireTask(taskId);
@@ -23329,19 +23443,19 @@ var BridgeTaskManager = class _BridgeTaskManager {
       if (status.status !== "running") {
         throw new TaskManagerError("TASK_STATE", `ZCode interaction can only be answered while the task is running (status: ${status.status})`);
       }
-      const record2 = this.#store.readInteractionRequest(input.task_id, input.request_id);
-      if (!record2) throw new TaskManagerError("TASK_NOT_FOUND", `unknown ZCode interaction request: ${input.request_id}`);
-      if (record2.state === "answered") {
+      const record3 = this.#store.readInteractionRequest(input.task_id, input.request_id);
+      if (!record3) throw new TaskManagerError("TASK_NOT_FOUND", `unknown ZCode interaction request: ${input.request_id}`);
+      if (record3.state === "answered") {
         throw new TaskManagerError("TASK_STATE", `ZCode interaction request ${input.request_id} was already answered`);
       }
-      const answer = buildInteractionAnswer(record2, input);
+      const answer = buildInteractionAnswer(record3, input);
       const state = this.#store.answerInteractionRequest(input.task_id, input.request_id, answer, this.#now().toISOString());
       if (state !== "answered") {
         throw new TaskManagerError("TASK_STATE", `ZCode interaction request ${input.request_id} was already answered`);
       }
       this.#store.appendEvent(input.task_id, "interaction_reply_submitted", "the calling host submitted a response to the ZCode interaction", {
         request_id: input.request_id,
-        method: record2.method,
+        method: record3.method,
         decision: input.decision
       });
       return { task_id: input.task_id, request_id: input.request_id, state: "answered" };
@@ -23799,7 +23913,7 @@ var BridgeTaskManager = class _BridgeTaskManager {
       return;
     }
     this.#store.patchRunningAttempt(taskId, status.attempt, { worker_pid: pid });
-    this.#store.appendEvent(taskId, "worker_started", "Bridge worker started", { worker_pid: pid });
+    this.#store.appendEvent(taskId, "worker_started", "Bridge worker started", { worker_pid: pid, attempt: status.attempt });
   }
   #requireTask(taskId) {
     if (!this.#store.hasTask(taskId)) {
@@ -23911,9 +24025,9 @@ function stableJson2(value) {
   if (value && typeof value === "object") return `{${Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => `${JSON.stringify(key)}:${stableJson2(item)}`).join(",")}}`;
   return JSON.stringify(value);
 }
-function buildInteractionAnswer(record2, input) {
-  const params = record2.params;
-  if (record2.method === "interaction/requestPermission") {
+function buildInteractionAnswer(record3, input) {
+  const params = record3.params;
+  if (record3.method === "interaction/requestPermission") {
     if (input.decision !== "allow" && input.decision !== "deny") {
       throw new TaskManagerError("TASK_INVALID", "permission requests require decision allow or deny");
     }
@@ -23993,6 +24107,9 @@ var zcodeTaskInputSchema = strictObject({
 }).describe("Full TaskPackage; workspace is the the calling host project root. Optional worktree_path is an existing execution directory selected and prepared by the calling host; the Bridge never creates or selects worktrees. The five array fields must be present (empty allowed), context is optional.");
 var taskIdOnlyInputSchema = strictObject({
   task_id: string2().min(1)
+});
+var zcodeFeedbackInputSchema = strictObject({
+  task_id: taskIdSchema
 });
 var zcodeContinueInputSchema = strictObject({
   task_id: string2().min(1),
@@ -24091,6 +24208,40 @@ var taskProgressPageSchema = object({
   has_more: boolean2(),
   omitted_events: number2().int().nonnegative().optional()
 });
+var taskFeedbackSnapshotV01Schema = strictObject({
+  schema_version: literal("0.1"),
+  task_id: string2(),
+  attempt: number2().int(),
+  status: _enum(["queued", "running", "completed", "failed", "cancelled", "waiting_for_master"]),
+  model: strictObject({
+    provider_id: string2().nullable(),
+    model_id: string2().nullable(),
+    reasoning_level: string2().nullable(),
+    source: literal("runtime")
+  }).nullable(),
+  phase: _null3(),
+  progress: _null3(),
+  activity: strictObject({
+    kind: _enum(["tool_call", "tool_update"]),
+    summary: string2(),
+    observed_at: string2(),
+    currentness: literal("last_observed")
+  }).nullable(),
+  interaction: strictObject({
+    state: _enum(["not_observed", "pending", "answered"]),
+    kind: _enum(["permission", "user_input"]).nullable()
+  }).nullable(),
+  result: strictObject({
+    source: literal("agent_report"),
+    summary: string2(),
+    issues: stringArray,
+    files_changed: stringArray,
+    tests: array(testReportSchema),
+    started_at: string2().nullable(),
+    finished_at: string2().nullable(),
+    duration_ms: number2().int().nonnegative().nullable()
+  }).nullable()
+});
 var toolErrorSchema = object({
   error: object({
     code: string2(),
@@ -24135,6 +24286,92 @@ var defaultModelSchema = object({
   model: modelSelectionSchema.nullable()
 });
 
+// src/feedback/renderer.ts
+function displayText(value, limit) {
+  return value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, " ").trim().slice(0, limit);
+}
+function oneLine(value, limit) {
+  return displayText(value.replace(/\s+/gu, " "), limit);
+}
+function truncatedOneLine(value, limit) {
+  const text = oneLine(value, limit + 1);
+  return text.length > limit ? `${text.slice(0, limit - 1).trimEnd()}\u2026` : text;
+}
+function testCommandLabel(value) {
+  let command = oneLine(value, 2e3);
+  const segments = command.split(/\s*&&\s*/u);
+  if (segments.length > 1) command = segments.at(-1) ?? command;
+  command = command.replace(/^['"]+|['"]+$/gu, "").trim();
+  const dotnet = command.match(/\bdotnet\s+test\s+([^\s]+)(.*)$/iu);
+  if (dotnet) {
+    const project = (dotnet[1] ?? "").split(/[\\/]/u).at(-1)?.replace(/\.csproj$/iu, "") ?? "project";
+    const filterTail = dotnet[2]?.match(/--filter(?:=|\s+)(.+)$/iu)?.[1]?.replace(/["']+$/gu, "").trim();
+    const filter = filterTail?.includes("~") ? filterTail.slice(filterTail.lastIndexOf("~") + 1) : filterTail;
+    return `dotnet test ${project}${filter ? ` \xB7 filter ${oneLine(filter, 64)}` : ""}`;
+  }
+  const packageScript = command.match(/\b(npm|pnpm|yarn)\s+(?:(run)\s+)?([A-Za-z0-9:_-]+)\b/iu);
+  if (packageScript) {
+    return `${packageScript[1]} ${packageScript[2] ? "run " : ""}${packageScript[3]}`;
+  }
+  const tokens = command.match(/(?:"[^"]*"|'[^']*'|[^\s]+)/gu) ?? [];
+  return tokens.slice(0, 2).map((token) => token.replace(/^['"]|['"]$/gu, "")).join(" ").slice(0, 96);
+}
+function renderTaskFeedback(snapshot) {
+  const terminalLabel = snapshot.status === "waiting_for_master" ? "WAITING_FOR_MASTER" : ["completed", "failed", "cancelled"].includes(snapshot.status) ? snapshot.status.toUpperCase() : null;
+  const lines = [`\u25A3 ZCode \xB7 ${snapshot.task_id}${terminalLabel ? ` \xB7 ${terminalLabel}` : ""}`];
+  switch (snapshot.status) {
+    case "queued":
+      lines.push("\u25CB Queued");
+      break;
+    case "running":
+      lines.push("\u2192 Running");
+      if (snapshot.model) {
+        const modelId = oneLine(snapshot.model.model_id ?? "", 160);
+        const reasoning = snapshot.model.reasoning_level ? oneLine(snapshot.model.reasoning_level, 80) : "";
+        if (modelId) lines.push(`Model: ${modelId}${reasoning ? ` \xB7 Reasoning: ${reasoning}` : ""}`);
+      }
+      if (snapshot.activity) lines.push("", `Last observed: ${oneLine(snapshot.activity.summary, 160)}`);
+      break;
+    case "completed":
+      lines.push("\u2713 Bridge task completed");
+      break;
+    case "failed":
+      lines.push("\u2717 Bridge task failed");
+      break;
+    case "cancelled":
+      lines.push("Result: Task cancellation confirmed by Bridge");
+      break;
+    case "waiting_for_master":
+      lines.push("Agent report requires a master decision.");
+      break;
+  }
+  const result = snapshot.result;
+  if (result) {
+    lines.push("", "Agent report:");
+    const summary = truncatedOneLine(result.summary, 220);
+    if (summary) lines.push(summary);
+    const changedCount = result.files_changed.length;
+    lines.push(`Changed: ${changedCount} ${changedCount === 1 ? "file" : "files"}`);
+    for (const test of result.tests.slice(0, 3)) {
+      lines.push(`Tests: ${testCommandLabel(test.command)} \xB7 reported ${test.status}`);
+    }
+    if (result.tests.length > 3) lines.push(`Tests: ${result.tests.length - 3} more reported`);
+    if (result.issues.length) {
+      const issue2 = truncatedOneLine(result.issues[0] ?? "", 140);
+      lines.push(`! ${result.issues.length} reported ${result.issues.length === 1 ? "issue" : "issues"}${issue2 ? ` \xB7 ${issue2}` : ""}`);
+      if (result.issues.length > 1) lines.push(`! ${result.issues.length - 1} more reported issues`);
+    }
+    if (result.duration_ms !== null) lines.push(`Duration: ${formatDuration(result.duration_ms)}`);
+  }
+  return lines.join("\n");
+}
+function formatDuration(durationMs2) {
+  const seconds = Math.floor(durationMs2 / 1e3);
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  return minutes > 0 ? `${minutes}m ${remainingSeconds}s` : `${remainingSeconds}s`;
+}
+
 // src/mcp/server.ts
 var SERVER_NAME = "codex-zcode-bridge";
 var SERVER_VERSION = "1.0.5"; // x-release-please-version
@@ -24150,6 +24387,12 @@ function errorResult(code, message) {
     isError: true,
     content: [{ type: "text", text: `${code}: ${message}` }],
     structuredContent: { error: { code, message } }
+  };
+}
+function feedbackResult(snapshot) {
+  return {
+    content: [{ type: "text", text: renderTaskFeedback(snapshot) }],
+    structuredContent: snapshot
   };
 }
 async function runTool(operation) {
@@ -24252,6 +24495,27 @@ function createBridgeServer(options) {
       outputSchema: taskStatusRecordSchema
     },
     async (args) => runTool(() => manager.getStatus(args.task_id))
+  );
+  server.registerTool(
+    "zcode_feedback",
+    {
+      title: "Read concise ZCode task feedback",
+      description: `Read a provenance-aware v0.1 snapshot for one task attempt. Bridge status, runtime-reported model/tool observations, and Agent-reported result claims remain distinct. phase/progress stay null; interaction remains not_observed without reliable current evidence. This snapshot does not replace zcode_events and does not verify or accept the result. ${EXECUTION_NOT_VERDICT}`,
+      inputSchema: zcodeFeedbackInputSchema,
+      outputSchema: taskFeedbackSnapshotV01Schema
+    },
+    async (args) => {
+      const getFeedback = manager.getFeedback;
+      if (!getFeedback) return errorResult("FEEDBACK_UNAVAILABLE", "task manager does not provide feedback snapshots");
+      try {
+        const snapshot = await getFeedback.call(manager, args.task_id);
+        return feedbackResult(snapshot);
+      } catch (error2) {
+        if (error2 instanceof TaskManagerError) return errorResult(error2.code, error2.message);
+        if (error2 instanceof BridgeError) return errorResult(error2.code.toUpperCase(), error2.message);
+        throw error2;
+      }
+    }
   );
   server.registerTool(
     "zcode_events",
@@ -24980,8 +25244,8 @@ function toModelRef(value) {
   const ref = asRecord3(value);
   return typeof ref.providerId === "string" && typeof ref.modelId === "string" ? { provider_id: ref.providerId, model_id: ref.modelId } : null;
 }
-function nestedString(record2, keys) {
-  let value = record2;
+function nestedString(record3, keys) {
+  let value = record3;
   for (const key of keys) value = asRecord3(value)[key];
   return typeof value === "string" ? value : null;
 }
