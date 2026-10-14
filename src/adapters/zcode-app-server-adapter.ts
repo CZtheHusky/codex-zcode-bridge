@@ -763,7 +763,7 @@ export class ZCodeAppServerAdapter implements CodingAgentAdapter {
       entry.child = null;
       const baseMessage = error instanceof Error ? error.message : String(error);
       const message = entry.timedOut ? "ZCode run exceeded its wall-clock budget" : entry.cancelRequested ? "ZCode task cancelled" : baseMessage;
-      const code = entry.timedOut ? "timeout" : entry.cancelRequested ? "cancelled" : "zcode_nonzero_exit";
+      const code = entry.timedOut ? "timeout" : entry.cancelRequested ? "cancelled" : error instanceof BridgeError ? error.code : "zcode_nonzero_exit";
       entry.onEvent({ type: "error", summary: message.slice(0, 1_500), details: { error_code: code } });
       if (error instanceof BridgeError) throw error;
       throw new BridgeError(code, message);
@@ -991,10 +991,15 @@ export class ZCodeAppServerAdapter implements CodingAgentAdapter {
       if (type === "turn.failed") {
         entry.acceptingTurn = false;
         entry.turnCompletedAt = this.#now().toISOString();
-        const problem = asRecord(payload.error);
-        void problem;
-        this.#publishSessionEvent(type, payload, entry, params);
-        entry.rejectTurn(new Error("ZCode turn failed"));
+        const quotaExhausted = providerReportedUsageExhaustion(payload.error);
+        const failure = quotaExhausted
+          ? new BridgeError(
+              "zcode_usage_exhausted",
+              "ZCode 提供方明确报告用量额度已耗尽；当前执行已中断。请立即停止当前任务并告知用户；不要继续工作、自动重试或续作，等待用户确认额度恢复后再继续。",
+            )
+          : new Error("ZCode turn failed");
+        this.#publishSessionEvent(type, payload, entry, params, quotaExhausted ? "zcode_usage_exhausted" : "zcode_nonzero_exit");
+        entry.rejectTurn(failure);
         return;
       }
       this.#publishSessionEvent(type, payload, entry, params);
@@ -1132,7 +1137,7 @@ export class ZCodeAppServerAdapter implements CodingAgentAdapter {
     };
   }
 
-  #publishSessionEvent(type: string, payload: JsonRecord, entry: RunEntry, event: JsonRecord): void {
+  #publishSessionEvent(type: string, payload: JsonRecord, entry: RunEntry, event: JsonRecord, failureCode?: string): void {
     if (type === "turn.started") {
       entry.onEvent({
         type: "turn_started",
@@ -1188,7 +1193,10 @@ export class ZCodeAppServerAdapter implements CodingAgentAdapter {
     } else if (type === "turn.failed") {
       entry.onEvent({
         type: "turn_failed",
-        summary: "ZCode turn failed",
+        summary: failureCode === "zcode_usage_exhausted"
+          ? "ZCode 提供方报告用量额度已耗尽；当前执行已中断。请立即停止当前任务并告知用户，等待用户确认额度恢复。"
+          : "ZCode turn failed",
+        ...(failureCode ? { details: { error_code: failureCode } } : {}),
       });
     }
   }
@@ -1305,6 +1313,34 @@ function nestedNumber(record: JsonRecord, path: string[]): number | null {
 
 function asRecord(value: unknown): JsonRecord {
   return isRecord(value) ? value : {};
+}
+
+/** Classify only explicit quota-exhaustion claims from allowlisted provider fields. */
+function providerReportedUsageExhaustion(value: unknown): boolean {
+  const error = asRecord(value);
+  const candidates = [
+    typeof value === "string" ? value : null,
+    typeof error.code === "string" ? error.code : null,
+    typeof error.type === "string" ? error.type : null,
+    typeof error.message === "string" ? error.message : null,
+  ].filter((candidate): candidate is string => candidate !== null)
+    .map((candidate) => candidate.slice(0, 2_048));
+  if (candidates.length === 0) return false;
+
+  const text = candidates.join("\n").normalize("NFKC").toLowerCase();
+  return [
+    /\binsufficient[_\s-]+quota\b/,
+    /\bquota[_\s-]+(?:(?:has[_\s-]+been)[_\s-]+)?(?:exceeded|exhausted|depleted)\b/,
+    /\b(?:usage|token)[_\s-]+quota[_\s-]+(?:exceeded|exhausted|depleted)\b/,
+    /\b(?:usage|token)[_\s-]+limit[_\s-]+(?:exceeded|exhausted|reached)\b/,
+    /\b(?:out[_\s-]+of|no[_\s-]+remaining|insufficient[_\s-]+)(?:[_\s-]+)?credits?\b/,
+    /\bcredits?[_\s-]+(?:exhausted|depleted)\b/,
+    /\bbilling[_\s-]+hard[_\s-]+limit[_\s-]+reached\b/,
+    /(?:用量|额度|配额)(?:已|已经)?(?:用尽|耗尽|用完|不足)/,
+    /(?:用尽|耗尽|用完|不足)(?:了)?(?:用量|额度|配额)/,
+    /(?:超出|超过)(?:了)?(?:当前)?(?:用量|额度|配额)/,
+    /(?:当前)?(?:用量|额度|配额)(?:已经)?(?:超出|不足)/,
+  ].some((pattern) => pattern.test(text));
 }
 
 async function syncDesktopStatus(

@@ -24,6 +24,7 @@ async function makeFakeRuntime(
   selectedModel: { providerId: string; modelId: string; options?: { reasoningLevel: string } } = { providerId: "provider-default", modelId: "model-default" },
   includeRequestedModel = true,
   interactionRequest = false,
+  turnFailure?: unknown,
 ): Promise<{ root: string; config: ZCodeRuntimeConfig; requestLog: string }> {
   const root = await mkdtemp(path.join(tmpdir(), "bridge-app-server-test-"));
   const entrypoint = path.join(root, "fake-app-server.cjs");
@@ -34,17 +35,17 @@ const fs = require("node:fs");
 const sessionId = ${JSON.stringify(SESSION_ID)};
 const requestLog = ${JSON.stringify(requestLog)};
 let selected = ${JSON.stringify(selectedModel)};
+const turnFailure = ${JSON.stringify(turnFailure ?? null)};
 const available = [selected, ${includeRequestedModel ? '{ providerId: "provider-123", modelId: "model-x" }, { providerId: "provider-123", modelId: "reasoning-model" }' : ""}];
 const report = ${JSON.stringify(validReport())};
 let turnFinished = false;
 function finishTurn() {
   if (turnFinished) return;
   turnFinished = true;
-  process.stdout.write(JSON.stringify({ method: "session/event", params: {
-    seq: 1, type: "turn.completed", payload: {
-      response: JSON.stringify(report), usage: { totalTokens: 4 }, resultType: "success"
-    }
-  }}) + "\n");
+  const params = turnFailure === null
+    ? { seq: 1, type: "turn.completed", payload: { response: JSON.stringify(report), usage: { totalTokens: 4 }, resultType: "success" } }
+    : { seq: 1, type: "turn.failed", payload: { error: turnFailure } };
+  process.stdout.write(JSON.stringify({ method: "session/event", params }) + "\n");
 }
 function snapshot() {
   return {
@@ -129,6 +130,75 @@ test("applies a per-task model override, verifies the selection, and does not pe
     assert.ok(events.some((event) => event.type === "session_ready" && String(event.details?.["selected_model"]).includes("provider-123/model-x")));
   } finally {
     await rm(runtime.root, { recursive: true, force: true });
+  }
+});
+
+test("classifies explicit provider usage exhaustion without publishing its raw error", async () => {
+  const privateMarker = "PRIVATE_PROVIDER_DETAIL_7f4b";
+  const runtime = await makeFakeRuntime(undefined, true, false, {
+    code: "insufficient_quota",
+    type: "usage_limit_error",
+    message: `Account usage quota exhausted; ${privateMarker}`,
+  });
+  const events: Array<{ type: string; summary: string; details?: Record<string, unknown> }> = [];
+  try {
+    const adapter = new ZCodeAppServerAdapter({
+      resolver: { resolve: async () => runtime.config },
+      onEvent: (event) => events.push(event),
+      timeoutMs: 10_000,
+      childEnvBase: { PATH: process.env.PATH },
+    });
+    const handle = await adapter.startTask({ task, workspace: makeWorkspace(runtime.root), attempt: 1 });
+    await assert.rejects(adapter.getResult(handle), (error: unknown) => {
+      assert.ok(error instanceof BridgeError);
+      assert.equal(error.code, "zcode_usage_exhausted");
+      assert.match(error.message, /额度已耗尽；当前执行已中断/);
+      assert.match(error.message, /立即停止当前任务并告知用户/);
+      assert.match(error.message, /不要继续工作、自动重试或续作/);
+      assert.match(error.message, /等待用户确认额度恢复后再继续/);
+      return true;
+    });
+    const failureEvents = events.filter((event) => event.type === "turn_failed" || event.type === "error");
+    assert.equal(failureEvents.length, 2);
+    assert.ok(failureEvents.every((event) => event.details?.error_code === "zcode_usage_exhausted"));
+    assert.match(failureEvents[0]!.summary, /用量额度已耗尽/);
+    assert.match(failureEvents[0]!.summary, /当前执行已中断/);
+    assert.match(failureEvents[0]!.summary, /立即停止当前任务并告知用户/);
+    assert.match(failureEvents[0]!.summary, /等待用户确认额度恢复/);
+    assert.doesNotMatch(JSON.stringify({ events, message: failureEvents.map((event) => event.summary) }), new RegExp(privateMarker));
+  } finally {
+    await rm(runtime.root, { recursive: true, force: true });
+  }
+});
+
+test("does not misclassify request rate limits or generic 429s as exhausted usage", async () => {
+  const cases = [
+    { code: "rate_limit_exceeded", message: "Rate limit exceeded; retry after 60 seconds" },
+    { code: "429", message: "Too many requests" },
+  ];
+  for (const providerError of cases) {
+    const runtime = await makeFakeRuntime(undefined, true, false, providerError);
+    const events: Array<{ type: string; summary: string; details?: Record<string, unknown> }> = [];
+    try {
+      const adapter = new ZCodeAppServerAdapter({
+        resolver: { resolve: async () => runtime.config },
+        onEvent: (event) => events.push(event),
+        timeoutMs: 10_000,
+        childEnvBase: { PATH: process.env.PATH },
+      });
+      const handle = await adapter.startTask({ task, workspace: makeWorkspace(runtime.root), attempt: 1 });
+      await assert.rejects(adapter.getResult(handle), (error: unknown) => {
+        assert.ok(error instanceof BridgeError);
+        assert.equal(error.code, "zcode_nonzero_exit");
+        assert.equal(error.message, "ZCode turn failed");
+        return true;
+      });
+      const failureEvents = events.filter((event) => event.type === "turn_failed" || event.type === "error");
+      assert.equal(failureEvents.length, 2);
+      assert.ok(failureEvents.every((event) => event.details?.error_code === "zcode_nonzero_exit"));
+    } finally {
+      await rm(runtime.root, { recursive: true, force: true });
+    }
   }
 });
 

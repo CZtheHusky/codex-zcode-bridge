@@ -22,6 +22,8 @@ worker 每 3 秒原子写入一次绑定 attempt 与 PID 的私有 heartbeat，�
 
 生产执行使用 ZCodeAppServerAdapter。历史 CLI adapter、envelope、loader 和 GitWorktreeProvider 保留为 legacy 模块及其测试，不从共享公共入口导出，也不参与生产任务路径。不要把 legacy CLI 的重试、快照排除或 worktree 创建语义应用到当前生产路径。
 
+收到 ZCode `turn.failed` 时，adapter 只在 provider 错误的顶层 `code`、`type`、`message`（或纯文本错误）中寻找明确的用量额度耗尽标记。匹配后错误码为 `zcode_usage_exhausted`，事件与结果使用 Bridge 固定说明，明确本次执行已中断，要求 Codex 立即停止当前任务并告知用户；不得继续工作、自动重试或续作，须等待用户确认额度恢复。原始 RPC 错误不外发。HTTP 429、普通 rate limit、泛化 limit 错误和未识别内容仍为 `zcode_nonzero_exit`，不能推断额度耗尽。是否能分类取决于当前 ZCode runtime 实际提供的错误字段。
+
 模型目录客户端与执行客户端目前保留各自 RPC 生命周期：前者处理短 session/cache，后者处理 turn/event/interaction。未为了减少行数合并协议客户端；公共配置、环境、报告和进程管理仍共享。
 
 TaskStore 的 JSON 用临时文件原子 rename；事件文件有独立短锁、字节上限、关键事件保留空间和稀疏索引。追加只读最后一个字节，不重新读取完整历史。worker 把模型输出拆为 2000 字符事件；容量用尽仍可能丢弃非关键事件，普通超长摘要明确标记截断。

@@ -13,7 +13,8 @@ export type BridgeErrorCode =
   | "worker_lost"
   | "invalid_json"
   | "invalid_agent_report"
-  | "zcode_nonzero_exit";
+  | "zcode_nonzero_exit"
+  | "zcode_usage_exhausted";
 
 export class BridgeError extends Error {
   readonly code: BridgeErrorCode;
