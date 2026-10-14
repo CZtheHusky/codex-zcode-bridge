@@ -2,7 +2,7 @@
 
 > Status: AUTHORITATIVE
 > Last updated: 2026-10-14
-> Last verified: 2026-10-14，本地源码与回归；真实 provider 错误字段兼容仍 NOT RUN。
+> Last verified: 2026-10-14，用量额度耗尽分类定向测试、类型检查和构建通过；完整测试有 1 项 Windows 锁并发用例首次报 EPERM、单独复跑通过；真实 provider 错误字段兼容仍 NOT RUN。
 
 准确类型与 schema 以 `src/interfaces.ts` 和 `src/mcp/schemas.ts` 为准。核心公共入口见 [SHARED_CORE.md](SHARED_CORE.md)。历史源码注释中的 V0.1/FROZEN 是沿革说明，不代表当前新增功能已经冻结。
 
@@ -25,3 +25,5 @@ zcode_interaction_reply 必须引用当前 attempt 的 interaction_requested.req
 稳定错误包括 TASK_INVALID、TASK_ALREADY_EXISTS、TASK_ID_CONFLICT、CONTINUE_OPERATION_CONFLICT、BRIDGE_BUSY、REQUEST_QUEUE_TIMEOUT、TASK_NOT_FOUND、TASK_NOT_FINISHED、TASK_STATE、CANCEL_FAILED，以及 runtime/provider、timeout、invalid_agent_report 等执行错误。明确匹配到 ZCode provider 用量额度耗尽错误时，任务保留 `failed` 语义并使用 `error_code: "zcode_usage_exhausted"`；仅当 runtime 错误字段含明确 quota/usage exhaustion 标记才使用该码，HTTP 429、一般限流和未知错误仍为 `zcode_nonzero_exit`。该错误结果说明当前执行已中断，Codex 应立即停止当前任务并告知用户，不继续工作、不自动重试或续作，并等待用户确认额度恢复。相同 task_id 与相同任务内容会重放首次回执；不同内容返回 TASK_ID_CONFLICT。超时后使用原 task_id 查询或重试，不要换 ID。续作可传 operation_id；相同 ID 与相同反馈会重放回执，不同反馈返回 CONTINUE_OPERATION_CONFLICT。cleanup_failed 表示运行时清理未验证，任务保持目录占用；再次 zcode_cancel 尝试清理后保留原执行结果。
 
 公开进度 usage 仅保留数值 token/cost 字段，隐藏推理、未知 metadata 和原始 RPC error 不转发。审批需要的工具输入、任务 prompt、可见回答、私有本地日志仍属于可能含敏感内容的任务证据，使用者须按本地数据策略管理。
+
+控制面、权威状态与补充观察的边界见 [ADR-004](decisions/ADR-004-separate-control-state-and-observation.md)：ZCode 本地 metadata、rollout 与日志可以进入补充观察，但不得单独决定任务状态、状态迁移或恢复结论；Desktop `tasks-index.sqlite` 是登记过的 best-effort 集成例外。

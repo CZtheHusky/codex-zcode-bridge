@@ -14,6 +14,17 @@
 
 每份文档顶部标注四种状态之一：`AUTHORITATIVE` 当前事实或合同、`DECISION` 已批准决策、`RESEARCH` 研究结论、`ARCHIVED` 历史材料。研究结论和归档材料不能当作当前实现使用。
 
+权威文档的顶部至少包含：
+
+```markdown
+> Status: AUTHORITATIVE
+> Last updated: YYYY-MM-DD
+> Last verified: YYYY-MM-DD（核对了哪几条；只核对了一部分就写明范围）
+> Verified against: <commit SHA>
+```
+
+`Last updated` 和 `Last verified` 是两件事：改过不等于核对过。`Verified against` 记录核对时代码停在哪个提交，指码已经前进很多时应当重新核对。索引汇总在 `docs/README.md`，但不能代替文档自身的标注。
+
 ## 硬规则
 
 - 改变 `docs/ARCHITECTURE.md`、`docs/INTERFACES.md`、`docs/SHARED_CORE.md`、`docs/ZCODE_RUNTIME.md` 描述的行为前，先有 `DECISION` 记录。实现不能反向改写合同。

@@ -1,5 +1,9 @@
 # ZCode App-Server Event Capability Probe
 
+> Status: RESEARCH
+> Date: 2026-10-05
+> 研究结论，不代表当前实现。索引见 [README.md](README.md)。
+
 **Date:** 2026-10-05 (Asia/Shanghai)
 **Scope:** Probe-only runtime research. No production Bridge source, schema, worker, or renderer was modified.
 
@@ -17,7 +21,7 @@
 
 The probe spawned the installed `zcode.cjs app-server --stdio` directly, created temporary workspaces under the OS temp directory, and used the account-provider reply in memory. Probe records retained event names, sequence numbers, key names, and a small allowlist of metadata. They did **not** retain model text, reasoning text, tool input/arguments, headers, credentials, or raw RPC frames.
 
-Sanitized evidence summary: [probe/evidence/run-001-summary.json](probe/evidence/run-001-summary.json).
+Sanitized evidence summary: [evidence/run-001-summary.json](evidence/run-001-summary.json).
 
 ## Method and evidence levels
 

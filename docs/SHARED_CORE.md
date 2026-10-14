@@ -1,5 +1,9 @@
 # 共享核心与宿主适配
 
+> Status: AUTHORITATIVE
+> Last updated: 2026-10-06
+> Last verified: 未逐条核对
+
 Codex 与 dsh 连接同一个 ZCode 执行端，因此任务调度、存储、续跑、取消、结果归一化、ZCode 协议和 Desktop 索引属于共享核心。`src/adapters/` 适配 ZCode，不是调用宿主。
 
 公共入口是 `codex-zcode-bridge/core`（源码 `src/core.ts`）。入口没有启动副作用，提供类型声明，并导出 `buildTaskFeedbackSnapshotV01` 与 `renderTaskFeedback`。`npm run build:core` 构建核心；当前仓库仍为 private，未发布独立 npm 包。可在本地构建后用 `npm pack` 生成版本化制品供 fork 锁定；发布渠道和独立核心版本策略尚未确定。

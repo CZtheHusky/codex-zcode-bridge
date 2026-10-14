@@ -1,5 +1,9 @@
 # Task Feedback v0.1 Implementation Report
 
+> Status: REPORT
+> Date: 2026-10-06
+> 一次性交付报告，不是当前事实来源。当前行为见 [INTERFACES.md](../INTERFACES.md) 与 [PROJECT_STATE.md](../PROJECT_STATE.md)。
+
 ## 1. Summary
 
 Implemented a provenance-aware `TaskFeedbackSnapshotV01`, an independent plain-text renderer, and the additive `zcode_feedback` MCP tool. The tool returns the structured snapshot and renders concise Codex transcript text. `zcode_events` remains the detailed event-history API. This was integrated additively on the v1.1.0 master baseline; its existing A4 `renderFeedback` template and opt-in task ledger remain intact.

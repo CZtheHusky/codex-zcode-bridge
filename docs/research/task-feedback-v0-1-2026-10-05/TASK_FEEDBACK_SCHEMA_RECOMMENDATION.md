@@ -1,8 +1,12 @@
 # Task Feedback Schema Recommendation
 
+> Status: RESEARCH
+> Date: 2026-10-05
+> 研究结论，不代表当前实现。索引见 [README.md](README.md)。
+
 **Decision:** Do **not** freeze the full `TaskFeedbackSnapshotV01` candidate yet. Freeze the core envelope and source semantics now; keep uncertain fields nullable/deferred until their state transitions are directly observed.
 
-Evidence: real ZCode `0.16.9` app-server probe documented in [ZCODE_APPSERVER_EVENT_CAPABILITY_PROBE.md](ZCODE_APPSERVER_EVENT_CAPABILITY_PROBE.md) and [run-001-summary.json](probe/evidence/run-001-summary.json).
+Evidence: real ZCode `0.16.9` app-server probe documented in [ZCODE_APPSERVER_EVENT_CAPABILITY_PROBE.md](ZCODE_APPSERVER_EVENT_CAPABILITY_PROBE.md) and [run-001-summary.json](evidence/run-001-summary.json).
 
 ## KEEP
 

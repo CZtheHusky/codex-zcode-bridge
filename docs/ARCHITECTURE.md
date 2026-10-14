@@ -1,10 +1,38 @@
 # 当前架构
 
 > Status: AUTHORITATIVE
-> Last updated: 2026-10-08
-> Last verified: 2026-10-08，核对本地源码及回归；真实 provider 和长期运行未复验。
+> Last updated: 2026-10-14
+> Last verified: 2026-10-14，核对用量额度耗尽错误路径；完整测试有 1 项 Windows 锁并发用例首次报 EPERM、单独复跑通过。其他条款沿用此前核验记录。
 
 本文件描述当前代码，不是历史阶段的冻结设计。公共类型见 `src/interfaces.ts`，MCP schema 见 `src/mcp/schemas.ts`；共享边界见 [SHARED_CORE.md](SHARED_CORE.md)。
+
+## 总览
+
+```text
+Codex 宿主
+   │ MCP（stdio）
+Bridge MCP server（src/mcp）
+   │
+TaskManager（src/manager）
+   ├─ TaskStore（src/store）        任务证据持久化
+   ├─ 调度队列与 worker 启动
+   └─ 事件与 feedback 聚合
+   │
+ZCodeAppServerAdapter（src/adapters）
+   │
+ZCode app-server（zcode.cjs app-server --stdio）
+```
+
+| 组件 | 负责 | 不负责 |
+|---|---|---|
+| MCP server | 对外契约面：工具名、输入 schema、输出结构 | 任务状态判定 |
+| TaskManager | 生命周期所有者：排队、调度、attempt 边界、终态、续跑、清理 | ZCode 协议细节 |
+| TaskStore | 任务证据持久化：status、result、events、attempt 元数据 | 业务判断 |
+| Worker | 单 attempt 的执行进程，一次进入、不重跑 | 调度决策 |
+| AppServerAdapter | ZCode 协议边界：session、事件、交互、清理 | 宿主策略 |
+| 调用宿主 | 准备执行目录、决定是否接收改动 | 任务调度 |
+
+合同级定义见 [INTERFACES.md](INTERFACES.md)。
 
 `src/mcp/main.ts` 仅为 Codex 入口；`src/host/stdio.ts` 组合宿主 profile、运行配置、TaskStore、DirectWorkspaceProvider、BridgeTaskManager 和 MCP server。启动不创建 ZCode session；坏的 Bridge 配置会明确阻止启动。doctor 对坏配置返回 error。
 

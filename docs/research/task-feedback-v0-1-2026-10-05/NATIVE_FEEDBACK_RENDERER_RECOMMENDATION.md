@@ -1,5 +1,9 @@
 # Native Feedback Renderer Recommendation
 
+> Status: RESEARCH
+> Date: 2026-10-05
+> 研究结论，不代表当前实现。索引见 [README.md](README.md)。
+
 This recommendation uses the evidence in [ZCODE_APPSERVER_EVENT_CAPABILITY_PROBE.md](ZCODE_APPSERVER_EVENT_CAPABILITY_PROBE.md). It separates Bridge/runtime observations from Agent-reported result fields.
 
 ## Safe to render now

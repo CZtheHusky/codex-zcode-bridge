@@ -1,8 +1,8 @@
 # ZCode 运行配置边界
 
 > Status: AUTHORITATIVE
-> Last updated: 2026-10-08
-> Last verified: 2026-10-08，本地配置及模型选择回归；真实 provider 未复验。
+> Last updated: 2026-10-14
+> Last verified: 2026-10-14，本地配置及模型选择回归沿用既有记录；真实 provider 未复验。
 
 当前生产路径是 `node zcode.cjs app-server --stdio`，不是历史 CLI `--prompt --json`。解析入口为 `NodeRuntimeResolver`，配置项与用户设置方法见仓库 README。
 

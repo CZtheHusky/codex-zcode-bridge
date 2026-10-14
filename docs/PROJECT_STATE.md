@@ -1,17 +1,22 @@
 # Project State
 
 > Status: AUTHORITATIVE
-> Last updated: 2026-10-08
-> Last verified: 2026-10-08，本地源码与回归；发布与真实运行边界见下文。
+> Last updated: 2026-10-14
+> Last verified: 2026-10-14，本地代码与额度分类定向测试；完整测试存在一项 Windows 锁并发失败，单独复跑通过；真实 provider 错误字段兼容仍 NOT RUN。
 
 当前状态快照，回答"现在什么能用、什么不能用"。路线图和优先级不在这里。
 
+控制面、权威 Bridge 状态与补充观察的边界见 [decisions/ADR-004](decisions/ADR-004-separate-control-state-and-observation.md)：本地材料可以观察，但不能单独驱动任务状态、状态迁移与恢复结论。
+
 ## 版本与发布
 
-- 当前发布：`1.2.2`（`package.json`、`plugins/codex-zcode-bridge/plugin.json`）。
+- 当前发布：`1.2.3`（`package.json`、`plugins/codex-zcode-bridge/plugin.json`）。
 - 发布方式：release-please 监听 `master`，合并后自动开版本 PR；合并版本 PR 才产生 tag 与 GitHub Release。
 - CI：`.github/workflows/ci.yml`，ubuntu 与 windows 两个作业，跑 typecheck、build、test、validate:plugin，并校验生成的 bundle 已随源码提交。
-- 本地未发布修复：`codex/long-session-reliability-fixes`，包含按身份核验 Windows 进程树、原子释放锁、严格报告提示与续作、provider namespace 兼容、业务观察与清理反馈，以及调度单次快照。版本号未改，未更新安装缓存或重启其他会话服务；不能把本地代码当作已加载版本。决策见 ADR-005，验证结果见 [本次报告](reports/2026-10-08-long-session-reliability.md)。
+
+## 本地未发布改动
+
+- `master` 当前含本地提交 `6756225`：明确识别 provider 报告的用量额度耗尽，并要求 Codex 立即停止当前任务、通知用户；未推送，尚未由 release-please 生成版本 PR。额度分类定向测试、typecheck、build 与插件校验通过；完整测试首次有一项 Windows 锁并发用例报 `EPERM`，该用例单独复跑通过。真实 provider 错误字段兼容仍 NOT RUN。
 
 ## 稳定
 
