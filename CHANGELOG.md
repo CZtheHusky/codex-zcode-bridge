@@ -4,6 +4,13 @@
 
 当前版本以 `package.json` 和 Release Please manifest 为准。提交推送到 `master` 后，Release Please 会在有待发布变更时创建发布 PR，并同步更新版本文件与本日志；合并发布 PR 后会生成对应 Git tag 和 GitHub Release。
 
+## [1.2.4](https://github.com/Sandyzzx/codex-zcode-bridge/compare/codex-zcode-bridge-v1.2.3...codex-zcode-bridge-v1.2.4) (2026-10-14)
+
+
+### Bug Fixes
+
+* stop work and report exhausted ZCode usage ([6756225](https://github.com/Sandyzzx/codex-zcode-bridge/commit/675622515db6475b095ce63b17c860fc8f549c89))
+
 ## [1.2.3](https://github.com/Sandyzzx/codex-zcode-bridge/compare/codex-zcode-bridge-v1.2.2...codex-zcode-bridge-v1.2.3) (2026-10-08)
 
 
