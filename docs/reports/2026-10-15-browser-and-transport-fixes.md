@@ -22,7 +22,7 @@
 
 **此前1.2.3修复版本的本机实测（2026-10-14）：** Windows、Node 24.19.0、ZCode Desktop 3.15.1.8093 / Agent 0.16.9、系统Edge。原生browser-client链路完成发现、导航、填写、单次提交、等待确认、截图与关闭；服务器收据及专属资源清理独立核对。真实旧会话恢复完成无工具诊断；安装版本打包MCP的单次43,014-byte Write（审批params45,704 bytes）与批准内容、源内容一致，退出及清理成功。完整测试340通过、1跳过、0失败。私人会话正文、ID、原始输入、机器路径和备份未纳入此公开分支。
 
-**当前1.2.4整合分支（2026-10-15，Windows / Node 24.19.0）：** 类型检查、测试编译、core/plugin构建、插件结构校验与差异格式检查均通过。完整隔离测试343项，342通过、1跳过、0失败，205.529秒；保留并覆盖上游新增的配额错误分类测试。命令为仓库npm scripts的等价Node入口：`node node_modules/typescript/bin/tsc --noEmit`、`node node_modules/typescript/bin/tsc --project tsconfig.test.json`、`node scripts/test-isolated.mjs`、`node scripts/build-core.mjs`、`node scripts/build-plugin.mjs`、`node scripts/validate-plugin.mjs`、`git diff --check`。此分支未重跑真实账号/浏览器链路，真实链路证据仅属于此前1.2.3修复版本。
+**当前1.2.4整合分支（2026-10-15，Windows / Node 24.19.0）：** 类型检查、测试编译、core/plugin构建、插件结构校验与差异格式检查均通过。完整隔离测试343项，342通过、1跳过、0失败，205.529秒；保留并覆盖上游新增的配额错误分类测试。命令为仓库npm scripts的等价Node入口：`node node_modules/typescript/bin/tsc --noEmit`、`node node_modules/typescript/bin/tsc --project tsconfig.test.json`、`node scripts/test-isolated.mjs`、`node scripts/build-core.mjs`、`node scripts/build-plugin.mjs`、`node scripts/validate-plugin.mjs`、`git diff --check`。该次完整回归之后，同一实现提交已安装为1.2.4，并补充真实账号最小链路：MCP initialize实际报告1.2.4，GLM-5.3/low/build执行Read→唯一Write，36-byte文件与批准内容及源文件一致，completed/exit0/cleanup verified，执行22.893秒。运行配置哈希保持不变。1.2.4未重跑原生浏览器及43KB Write链路；这两项实测证据仍属于此前1.2.3修复版本。
 
 受测src/test/scripts与package清单的SHA256指纹：`3325db76d632884147675f7a92e73449ac71301c369cdde2171af4525dde58a1`（按相对路径排序，逐行`path:sha256\n`再取哈希）。构建产物重新生成，不携带工作树junction路径。
 
