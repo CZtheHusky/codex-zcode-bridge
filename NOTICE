@@ -28,7 +28,7 @@ owned rows and titles, and best-effort session status synchronization.
 
 This product also includes software adapted from the public ZCode source at
 commit aac4755666d09fdcd70272fcf063c077a639015f (Apache-2.0), used to implement
-the optional Bridge browser host (ADR-006):
+the optional Bridge browser host (ADR-007):
 
   Adapted sources: packages/shared/src/browser-use/{command-metadata,commands,
   backend,result,snapshot}.ts were adapted, with modifications, into
@@ -80,3 +80,8 @@ license texts are included under plugins/codex-zcode-bridge/licenses/:
     Apache-2.0. Bundled in source form inside worker/vendor/pkg/browser-host.cjs
     with its browsers.json and package.json registry data at worker/vendor/;
     see PLAYWRIGHT-CORE-LICENSE.txt and the package's ThirdPartyNotices.
+    The official playwright-core artifact prebuilds MIT-licensed
+    @modelcontextprotocol/sdk validation code with ajv and ajv-formats into
+    lib/utilsBundle.js. The Bridge's managed CDP path never uses that
+    embedded MCP/ajv content, and the vendored bundle currently carries it
+    untrimmed rather than modifying upstream's prebuilt file.

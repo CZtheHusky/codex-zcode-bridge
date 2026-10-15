@@ -73,6 +73,25 @@ async function parsedParams(schema: { safeParse: (value: unknown) => { success: 
   return result.data as Record<string, unknown>;
 }
 
+/**
+ * The host's deadline and close-budget timers are unref'd so a leaked budget
+ * can never keep a real worker process alive. On Node 22.18 an isolated test
+ * process holds no other referenced handle while awaiting those timers, so
+ * the event loop drains and the process exits before the 1s budget fires;
+ * the same fixtures settle on Node 24 without help. Each affected fixture
+ * holds its own referenced keepalive so the unref'd host timer is observed
+ * without a global handle or a larger host budget. The keepalive itself is
+ * bounded and cleared in finally on success, assertion failure, and host
+ * hangs, so a broken host fails the test instead of hanging it.
+ */
+function withBoundedKeepalive<T>(maxWaitMs: number, run: () => Promise<T>): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const guard = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`fixture exceeded its ${maxWaitMs}ms keepalive bound`)), maxWaitMs);
+  });
+  return Promise.race([run(), guard]).finally(() => clearTimeout(timer));
+}
+
 test("disabled host lists no browsers and declines execute in-band", async () => {
   const events: BrowserHostEvent[] = [];
   const backend = new FakeBackend();
@@ -164,19 +183,21 @@ test("cancelRequest aborts the pending request and stays idempotent", async () =
 });
 
 test("host timeout returns a timeout error with honest sideEffect classification", async () => {
-  const backend = new FakeBackend();
-  backend.nextExecute = ({ signal }) => new Promise((_resolve, reject) => {
-    signal?.addEventListener("abort", () => reject(new DOMException("Browser command cancelled", "AbortError")));
+  await withBoundedKeepalive(5_000, async () => {
+    const backend = new FakeBackend();
+    backend.nextExecute = ({ signal }) => new Promise((_resolve, reject) => {
+      signal?.addEventListener("abort", () => reject(new DOMException("Browser command cancelled", "AbortError")));
+    });
+    const host = createBrowserHost({ mode: "headless", backendFactory: async () => backend, commandTimeoutMs: 1_000 });
+    await host.handleList(await parsedList(listParams()), new AbortController().signal);
+    const navigate = await host.handleExecute(await parsedExecute(executeParams({ method: "navigate", url: "http://127.0.0.1:1/slow" })), new AbortController().signal);
+    assert.equal(navigate.ok, false);
+    assert.equal(navigate.error?.code, "timeout");
+    assert.equal(navigate.error?.sideEffect, "uncertain");
+    const getState = await host.handleExecute(await parsedExecute(executeParams({ method: "getState" }, { requestId: "exec-2" })), new AbortController().signal);
+    assert.equal(getState.error?.code, "timeout");
+    assert.equal(getState.error?.sideEffect, "none");
   });
-  const host = createBrowserHost({ mode: "headless", backendFactory: async () => backend, commandTimeoutMs: 1_000 });
-  await host.handleList(await parsedList(listParams()), new AbortController().signal);
-  const navigate = await host.handleExecute(await parsedExecute(executeParams({ method: "navigate", url: "http://127.0.0.1:1/slow" })), new AbortController().signal);
-  assert.equal(navigate.ok, false);
-  assert.equal(navigate.error?.code, "timeout");
-  assert.equal(navigate.error?.sideEffect, "uncertain");
-  const getState = await host.handleExecute(await parsedExecute(executeParams({ method: "getState" }, { requestId: "exec-2" })), new AbortController().signal);
-  assert.equal(getState.error?.code, "timeout");
-  assert.equal(getState.error?.sideEffect, "none");
 });
 
 test("launch failure surfaces a bounded error and a single launch-failed event", async () => {
@@ -282,24 +303,28 @@ test("a failed close stays failed on repeated close calls", async () => {
 });
 
 test("a backend close that never settles is reported unverified within the host budget", async () => {
-  const backend = new FakeBackend();
-  backend.close = () => new Promise(() => undefined);
-  const host = createBrowserHost({ mode: "headless", backendFactory: async () => backend, closeBudgetMs: 1_000 });
-  await host.handleList(await parsedList(listParams()), new AbortController().signal);
-  const outcome = await host.close();
-  assert.equal(outcome.closed, false);
-  assert.match(outcome.error ?? "", /did not settle within the close budget/);
+  await withBoundedKeepalive(5_000, async () => {
+    const backend = new FakeBackend();
+    backend.close = () => new Promise(() => undefined);
+    const host = createBrowserHost({ mode: "headless", backendFactory: async () => backend, closeBudgetMs: 1_000 });
+    await host.handleList(await parsedList(listParams()), new AbortController().signal);
+    const outcome = await host.close();
+    assert.equal(outcome.closed, false);
+    assert.match(outcome.error ?? "", /did not settle within the close budget/);
+  });
 });
 
 test("the host deadline returns timeout even when the backend ignores its AbortSignal", async () => {
-  const backend = new FakeBackend();
-  backend.nextExecute = () => new Promise(() => undefined);
-  const host = createBrowserHost({ mode: "headless", backendFactory: async () => backend, commandTimeoutMs: 1_000 });
-  await host.handleList(await parsedList(listParams()), new AbortController().signal);
-  const result = await host.handleExecute(await parsedExecute(executeParams({ method: "navigate", url: "http://127.0.0.1:1/hang" })), new AbortController().signal);
-  assert.equal(result.ok, false);
-  assert.equal(result.error?.code, "timeout");
-  assert.equal(result.error?.sideEffect, "uncertain");
+  await withBoundedKeepalive(5_000, async () => {
+    const backend = new FakeBackend();
+    backend.nextExecute = () => new Promise(() => undefined);
+    const host = createBrowserHost({ mode: "headless", backendFactory: async () => backend, commandTimeoutMs: 1_000 });
+    await host.handleList(await parsedList(listParams()), new AbortController().signal);
+    const result = await host.handleExecute(await parsedExecute(executeParams({ method: "navigate", url: "http://127.0.0.1:1/hang" })), new AbortController().signal);
+    assert.equal(result.ok, false);
+    assert.equal(result.error?.code, "timeout");
+    assert.equal(result.error?.sideEffect, "uncertain");
+  });
 });
 
 async function parsedList(payload: Record<string, unknown>): Promise<import("../src/browser/params.js").BrowserListParams> {

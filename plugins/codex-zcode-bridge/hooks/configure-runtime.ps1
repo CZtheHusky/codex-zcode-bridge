@@ -10,7 +10,7 @@ param(
     [string]$DefaultReasoningLevel,
     [ValidateSet("plan", "build", "edit", "yolo")][string]$Mode,
     [ValidateRange(1, 8)][int]$MaxConcurrentWorkers,
-    # ADR-006 optional headless browser host. Default off; when headless is
+    # ADR-007 optional headless browser host. Default off; when headless is
     # enabled the managed runtime uses an isolated temporary profile and can
     # be pointed at an installed system browser executable.
     [ValidateSet("off", "headless")][string]$BrowserUse,
