@@ -193,8 +193,11 @@ var init_atomic_rename = __esm({
 // src/store/task-store.ts
 var task_store_exports = {};
 __export(task_store_exports, {
+  InteractionRequestTooLargeError: () => InteractionRequestTooLargeError,
+  MAX_INTERACTION_PARAMS_BYTES: () => MAX_INTERACTION_PARAMS_BYTES,
   TaskStore: () => TaskStore,
   isTerminalStatus: () => isTerminalStatus,
+  stableJson: () => stableJson,
   toPublicStatus: () => toPublicStatus
 });
 import { appendFileSync, chmodSync, closeSync, copyFileSync, existsSync as existsSync3, mkdirSync as mkdirSync2, openSync, readFileSync as readFileSync3, readSync, readdirSync, rmSync, statSync as statSync3, writeFileSync as writeFileSync2 } from "node:fs";
@@ -269,7 +272,7 @@ function toPublicStatus(status) {
   if (status.error) record3.error = status.error;
   return record3;
 }
-var TASK_ID_PATTERN, DEFAULT_MAX_LOG_BYTES, MAX_CRITICAL_EVENT_RESERVE_BYTES, CRITICAL_EVENT_TYPES, TaskStore;
+var TASK_ID_PATTERN, DEFAULT_MAX_LOG_BYTES, MAX_INTERACTION_PARAMS_BYTES, LEGACY_INTERACTION_PARAMS_BYTES, SHA256_HEX_PATTERN, InteractionRequestTooLargeError, MAX_CRITICAL_EVENT_RESERVE_BYTES, CRITICAL_EVENT_TYPES, TaskStore;
 var init_task_store = __esm({
   "src/store/task-store.ts"() {
     "use strict";
@@ -277,6 +280,21 @@ var init_task_store = __esm({
     init_atomic_rename();
     TASK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
     DEFAULT_MAX_LOG_BYTES = 10 * 1024 * 1024;
+    MAX_INTERACTION_PARAMS_BYTES = 1024 * 1024;
+    LEGACY_INTERACTION_PARAMS_BYTES = 32e3;
+    SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/u;
+    InteractionRequestTooLargeError = class extends Error {
+      actualBytes;
+      limitBytes;
+      constructor(actualBytes, limitBytes) {
+        super(
+          `ZCode interaction request exceeded the ${limitBytes}-byte persistence limit (actual ${actualBytes} UTF-8 bytes); split the tool input into smaller parts and retry`
+        );
+        this.name = "InteractionRequestTooLargeError";
+        this.actualBytes = actualBytes;
+        this.limitBytes = limitBytes;
+      }
+    };
     MAX_CRITICAL_EVENT_RESERVE_BYTES = 256 * 1024;
     CRITICAL_EVENT_TYPES = /* @__PURE__ */ new Set([
       "error",
@@ -296,7 +314,12 @@ var init_task_store = __esm({
       "cancel_failed",
       "cleanup_unverified",
       "outcome_checkpoint_failed",
-      "outcome_recovered"
+      "outcome_recovered",
+      // ADR-008: fatal frame failures and undeliverable approvals must survive
+      // event-log capacity pressure.
+      "protocol_error",
+      "interaction_request_oversized",
+      "interaction_request_undeliverable"
     ]);
     TaskStore = class {
       #dataRoot;
@@ -1118,13 +1141,17 @@ var init_task_store = __esm({
             }
             return { record: record4, created: false };
           }
-          if (Buffer.byteLength(JSON.stringify(request.params), "utf8") > 32e3) {
-            throw new Error("ZCode interaction request exceeded the 32 KB persistence limit");
+          const serialized = JSON.stringify(request.params);
+          const bytes = Buffer.byteLength(serialized, "utf8");
+          if (bytes > MAX_INTERACTION_PARAMS_BYTES) {
+            throw new InteractionRequestTooLargeError(bytes, MAX_INTERACTION_PARAMS_BYTES);
           }
           const record3 = {
             ...request,
             state: "pending",
-            created_at: createdAt
+            created_at: createdAt,
+            params_bytes: bytes,
+            params_sha256: createHash("sha256").update(serialized).digest("hex")
           };
           this.#writeJsonAtomic(file, record3);
           return { record: record3, created: true };
@@ -1136,6 +1163,60 @@ var init_task_store = __esm({
         const record3 = this.#readJson(file);
         if (record3.request_id !== requestId) throw new Error("interaction request id hash mismatch");
         return record3;
+      }
+      /** Absolute path of one attempt's private full-request record; referenced
+       * by bounded interaction_requested preview events (ADR-008). */
+      interactionRequestPath(taskId, requestId) {
+        if (!requestId || requestId.length > 512) throw new Error("invalid ZCode interaction request_id");
+        return this.interactionFile(taskId, requestId);
+      }
+      /**
+       * ADR-008 approval guard: the full request behind an approval must be
+       * readable and consistent with its persisted byte count and SHA256 before
+       * the reply may be treated as authorization. Corrupt, missing, edited, or
+       * metadata-stripped records are reported, never accepted. Only genuinely
+       * legacy small records (no metadata at all, within the old 32,000-byte
+       * store limit) stay compatible; anything larger or partially annotated must
+       * carry complete, well-typed, matching metadata, and verification still
+       * enforces the 1 MiB persistence limit.
+       */
+      verifyInteractionRequestIntegrity(taskId, requestId) {
+        const file = this.interactionFile(taskId, requestId);
+        try {
+          if (!existsSync3(file)) return { ok: false, reason: "the full request record is missing" };
+          const record3 = this.#readJson(file);
+          if (record3.request_id !== requestId) return { ok: false, reason: "the persisted request id does not match this request" };
+          if (record3.state !== "pending" && record3.state !== "answered") return { ok: false, reason: "the persisted request state is unreadable" };
+          const serialized = JSON.stringify(record3.params);
+          const bytes = Buffer.byteLength(serialized, "utf8");
+          if (bytes > MAX_INTERACTION_PARAMS_BYTES) {
+            return { ok: false, reason: `the full request content is ${bytes} UTF-8 bytes, over the ${MAX_INTERACTION_PARAMS_BYTES}-byte persistence limit` };
+          }
+          const hasBytes = record3.params_bytes !== void 0;
+          const hasHash = record3.params_sha256 !== void 0;
+          if (!hasBytes && !hasHash) {
+            if (bytes <= LEGACY_INTERACTION_PARAMS_BYTES) return { ok: true };
+            return { ok: false, reason: `the full request record carries no integrity metadata but is ${bytes} UTF-8 bytes, over the legacy ${LEGACY_INTERACTION_PARAMS_BYTES}-byte limit; it cannot be treated as a legacy record` };
+          }
+          if (!hasBytes || !hasHash) {
+            return { ok: false, reason: "the full request record has incomplete integrity metadata (byte count and SHA256 must both be present)" };
+          }
+          if (typeof record3.params_bytes !== "number" || !Number.isSafeInteger(record3.params_bytes) || record3.params_bytes < 0) {
+            return { ok: false, reason: "the persisted byte count is not a valid non-negative integer" };
+          }
+          if (typeof record3.params_sha256 !== "string" || !SHA256_HEX_PATTERN.test(record3.params_sha256)) {
+            return { ok: false, reason: "the persisted SHA256 is not a valid 64-character hex digest" };
+          }
+          if (record3.params_bytes !== bytes) {
+            return { ok: false, reason: "the persisted byte count does not match the full content" };
+          }
+          if (record3.params_sha256 !== createHash("sha256").update(serialized).digest("hex")) {
+            return { ok: false, reason: "the persisted SHA256 does not match the full content" };
+          }
+          return { ok: true };
+        } catch {
+          return { ok: false, reason: "the full request record is unreadable or corrupt" };
+        }
       }
       answerInteractionRequest(taskId, requestId, answer, answeredAt = (/* @__PURE__ */ new Date()).toISOString()) {
         const file = this.interactionFile(taskId, requestId);
@@ -1151,6 +1232,30 @@ var init_task_store = __esm({
             answered_at: answeredAt
           });
           return "answered";
+        });
+      }
+      /** ADR-008: approval answers verify the full request inside the same
+       * interaction lock the answer is written under, so the record checked for
+       * integrity is exactly the one the answer lands on — there is no
+       * check-then-write window where an edited record could slip through. */
+      answerInteractionRequestVerified(taskId, requestId, answer, options, answeredAt = (/* @__PURE__ */ new Date()).toISOString()) {
+        const file = this.interactionFile(taskId, requestId);
+        return withEventLock(path4.join(this.taskDir(taskId), "interactions.lock"), () => {
+          if (!existsSync3(file)) throw new Error(`unknown ZCode interaction request: ${requestId}`);
+          const current = this.#readJson(file);
+          if (current.request_id !== requestId) throw new Error("interaction request id hash mismatch");
+          if (current.state === "answered") return { state: "already_answered" };
+          if (options.requireIntegrity) {
+            const integrity = this.verifyInteractionRequestIntegrity(taskId, requestId);
+            if (!integrity.ok) return { state: "integrity_failed", reason: integrity.reason };
+          }
+          this.#writeJsonAtomic(file, {
+            ...current,
+            state: "answered",
+            answer,
+            answered_at: answeredAt
+          });
+          return { state: "answered" };
         });
       }
       interactionFile(taskId, requestId) {
@@ -22971,7 +23076,9 @@ var PERSISTED_RUNTIME_KEYS = [
   "ZCODE_BRIDGE_DEFAULT_REASONING_LEVEL",
   "ZCODE_BRIDGE_MODE",
   "ZCODE_BRIDGE_MAX_CONCURRENT_WORKERS",
-  "ZCODE_BRIDGE_TIMEOUT_MS"
+  "ZCODE_BRIDGE_TIMEOUT_MS",
+  "ZCODE_BRIDGE_BROWSER_USE",
+  "ZCODE_BRIDGE_BROWSER_EXECUTABLE"
 ];
 function loadPersistedRuntimeEnvironment(source, homeDir = homedir2(), host = codexHostProfile(homeDir)) {
   validateHostProfile(host);
@@ -24841,15 +24948,31 @@ var BridgeTaskManager = class _BridgeTaskManager {
       if (status.status !== "running") {
         throw new TaskManagerError("TASK_STATE", `ZCode interaction can only be answered while the task is running (status: ${status.status})`);
       }
-      const record3 = this.#store.readInteractionRequest(input.task_id, input.request_id);
-      if (!record3) throw new TaskManagerError("TASK_NOT_FOUND", `unknown ZCode interaction request: ${input.request_id}`);
+      let record3;
+      try {
+        const read = this.#store.readInteractionRequest(input.task_id, input.request_id);
+        if (!read) throw new TaskManagerError("TASK_NOT_FOUND", `unknown ZCode interaction request: ${input.request_id}`);
+        record3 = read;
+      } catch (error2) {
+        if (error2 instanceof TaskManagerError) throw error2;
+        throw new TaskManagerError(
+          "TASK_STATE",
+          `ZCode interaction request ${input.request_id} could not be read: the persisted full request is unreadable or corrupt`
+        );
+      }
       if (record3.state === "answered") {
         throw new TaskManagerError("TASK_STATE", `ZCode interaction request ${input.request_id} was already answered`);
       }
       const answer = buildInteractionAnswer(record3, input);
-      const state = this.#store.answerInteractionRequest(input.task_id, input.request_id, answer, this.#now().toISOString());
-      if (state !== "answered") {
+      const answered = input.decision === "allow" || input.decision === "accept" ? this.#store.answerInteractionRequestVerified(input.task_id, input.request_id, answer, { requireIntegrity: true }, this.#now().toISOString()) : { state: this.#store.answerInteractionRequest(input.task_id, input.request_id, answer, this.#now().toISOString()) };
+      if (answered.state === "already_answered") {
         throw new TaskManagerError("TASK_STATE", `ZCode interaction request ${input.request_id} was already answered`);
+      }
+      if (answered.state === "integrity_failed") {
+        throw new TaskManagerError(
+          "TASK_STATE",
+          `ZCode interaction request ${input.request_id} cannot be approved: ${answered.reason}; the approval was not recorded as granted`
+        );
       }
       this.#store.appendEvent(input.task_id, "interaction_reply_submitted", "the calling host submitted a response to the ZCode interaction", {
         request_id: input.request_id,
@@ -26719,6 +26842,29 @@ async function runBridgeDoctor(options = {}) {
       status: "unknown",
       summary: modelConfigured ? "A Bridge default model is configured; actual app-server availability is checked when a task starts" : "No Bridge model override; the ZCode account default will be used and cannot be confirmed without starting a session"
     });
+    const browserUse = env["ZCODE_BRIDGE_BROWSER_USE"]?.trim() ?? "";
+    const browserExecutable = env["ZCODE_BRIDGE_BROWSER_EXECUTABLE"]?.trim() ?? "";
+    if (browserUse === "" || browserUse === "off") {
+      checks.push({
+        name: "browser_host",
+        status: "ok",
+        summary: browserUse === "off" ? "Browser host is explicitly disabled; browser RPCs answer with an empty browser list" : "Browser host is disabled by default; browser RPCs answer with an empty browser list"
+      });
+    } else if (browserUse === "headless") {
+      if (browserExecutable) {
+        if (!path10.isAbsolute(browserExecutable)) {
+          checks.push({ name: "browser_host", status: "error", summary: `ZCODE_BRIDGE_BROWSER_EXECUTABLE must be an absolute path: ${browserExecutable}` });
+        } else if (existsSync8(browserExecutable)) {
+          checks.push({ name: "browser_host", status: "ok", summary: `Headless browser host is enabled with the configured executable (${path10.basename(browserExecutable)})` });
+        } else {
+          checks.push({ name: "browser_host", status: "error", summary: `Configured browser executable does not exist: ${browserExecutable}` });
+        }
+      } else {
+        checks.push({ name: "browser_host", status: "unknown", summary: "Headless browser host is enabled; the managed runtime resolves an installed Chromium/Edge at first use and is not probed here" });
+      }
+    } else {
+      checks.push({ name: "browser_host", status: "warning", summary: `ZCODE_BRIDGE_BROWSER_USE must be "off" or "headless"; got "${browserUse}" \u2014 the browser host stays disabled` });
+    }
     const dataRoot = options.dataRoot ?? env["ZCODE_BRIDGE_DATA_DIR"]?.trim() ?? null;
     if (dataRoot && existsSync8(dataRoot)) {
       try {

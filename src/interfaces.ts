@@ -274,6 +274,10 @@ export interface ZCodeInteractionRecord extends ZCodeInteractionRequest {
   readonly created_at: string;
   readonly answer?: Record<string, unknown>;
   readonly answered_at?: string;
+  /** ADR-008 additive metadata over the serialized sanitized params; written
+   * with the record so approvals can verify the full content is intact. */
+  readonly params_bytes?: number;
+  readonly params_sha256?: string;
 }
 
 export interface TaskProgressPage {

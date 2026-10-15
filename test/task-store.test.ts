@@ -1,6 +1,7 @@
 // TaskStore tests: atomic JSON persistence, bounded separate logs, terminal
 // results, attempt archives, and task-id path safety.
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
@@ -43,15 +44,58 @@ test("interaction requests are durable, deduplicated, and answered atomically", 
     assert.equal(duplicate.created, false);
     assert.equal(duplicate.record.created_at, "2026-09-27T00:00:01.000Z");
     assert.equal(store.answerInteractionRequest("task_1", request.request_id, { decision: "deny" }, "2026-09-27T00:00:03.000Z"), "answered");
-    assert.deepEqual(store.readInteractionRequest("task_1", request.request_id), {
+    const persisted = store.readInteractionRequest("task_1", request.request_id);
+    assert.deepEqual({
+      request_id: persisted?.request_id,
+      method: persisted?.method,
+      params: persisted?.params,
+      state: persisted?.state,
+      created_at: persisted?.created_at,
+      answer: persisted?.answer,
+      answered_at: persisted?.answered_at,
+    }, {
       ...request,
       state: "answered",
       created_at: "2026-09-27T00:00:01.000Z",
       answer: { decision: "deny" },
       answered_at: "2026-09-27T00:00:03.000Z",
     });
+    // ADR-008 metadata: byte count and SHA256 over the serialized params.
+    assert.equal(persisted?.params_bytes, Buffer.byteLength(JSON.stringify(request.params), "utf8"));
+    assert.equal(
+      persisted?.params_sha256,
+      createHash("sha256").update(JSON.stringify(request.params)).digest("hex"),
+    );
     assert.equal(store.answerInteractionRequest("task_1", request.request_id, { decision: "allow" }), "already_answered");
     assert.equal(store.readInteractionRequest("task_1", "missing"), null);
+  } finally {
+    await removeTempDir(root);
+  }
+});
+
+test("interaction params persist complete up to 1 MiB (ADR-008); the old 32 KB limit is gone", async () => {
+  const root = await makeTempDir("store-interaction-large");
+  try {
+    const store = new TaskStore(root);
+    store.createTask(makeTask(), "2026-09-27T00:00:00.000Z");
+    // A Write-tool permission payload above the old 32,000-byte limit (the
+    // production failure: "exceeded the 32 KB persistence limit").
+    const medium = { toolName: "Write", input: { path: "fixture.txt", content: "w".repeat(40 * 1024) } };
+    const created = store.writeInteractionRequest("task_1", {
+      request_id: "permission/40k",
+      method: "interaction/requestPermission",
+      params: medium,
+    });
+    assert.equal(created.created, true);
+    assert.deepEqual(store.readInteractionRequest("task_1", "permission/40k")?.params, medium);
+    // Exactly 1 MiB of serialized params is still accepted.
+    const envelopeOverhead = Buffer.byteLength(JSON.stringify({ pad: "" }), "utf8");
+    const atLimit = { pad: "x".repeat(1024 * 1024 - envelopeOverhead) };
+    assert.equal(Buffer.byteLength(JSON.stringify(atLimit), "utf8"), 1024 * 1024);
+    assert.equal(
+      store.writeInteractionRequest("task_1", { request_id: "permission/limit", method: "interaction/requestPermission", params: atLimit }).created,
+      true,
+    );
   } finally {
     await removeTempDir(root);
   }

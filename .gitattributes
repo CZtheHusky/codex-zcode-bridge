@@ -1,0 +1,3 @@
+# Generated vendor code includes significant trailing spaces in upstream
+# template literals. Preserve those bytes; keep ordinary source checks strict.
+plugins/codex-zcode-bridge/worker/vendor/pkg/browser-host.cjs linguist-generated=true whitespace=-blank-at-eol

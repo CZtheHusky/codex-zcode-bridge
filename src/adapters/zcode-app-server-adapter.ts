@@ -3,6 +3,7 @@
 // replay boundary, and docs/ZCODE_RUNTIME.md the runtime configuration edge.
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { homedir } from "node:os";
+import path from "node:path";
 import type {
   AgentHandle,
   AgentProcessStatus,
@@ -26,6 +27,19 @@ import { resolveSessionPreferences } from "../runtime/session-preferences.js";
 import { resolveTaskTimeout } from "../runtime/task-timeout.js";
 import { registerDesktopTask, updateDesktopTaskStatus, type DesktopTaskIndexEntry, type DesktopTaskStatus } from "./task-index-sync.js";
 import { codexHostProfile, validateHostProfile, type BridgeHostProfile } from "../host/profile.js";
+import { browserListParamsSchema, browserExecuteParamsSchema, type BrowserListParams, type BrowserExecuteParams } from "../browser/params.js";
+import { createBrowserHost, type BrowserHost, type BrowserHostMode, type BrowserHostOptions } from "../browser/host.js";
+import { createDefaultBrowserBackendFactory } from "../browser/load-backend.js";
+import type { BrowserControlPort } from "../browser/contracts.js";
+
+/** 可选浏览器宿主配置（ADR-007）；生产从持久化运行配置解析，测试可注入。 */
+export interface AdapterBrowserOptions {
+  mode?: BrowserHostMode;
+  executablePath?: string;
+  backendFactory?: () => Promise<BrowserControlPort>;
+  commandTimeoutMs?: number;
+  listTimeoutMs?: number;
+}
 
 type ProgressEvent = { type: string; summary: string; details?: Record<string, unknown> };
 type ProgressSink = (event: ProgressEvent) => void;
@@ -93,6 +107,15 @@ interface RunEntry {
   acceptingTurn: boolean;
   turnId: string | null;
   awaitingTurnStart: boolean;
+  // ADR-007 browser host state: bound once the session exists, closed with
+  // the attempt in every terminal path; a failed browser teardown keeps the
+  // final outcome unverified instead of being swallowed by app-server cleanup.
+  browserConfig: ResolvedBrowserConfig | null;
+  browserHost: BrowserHost | null;
+  browserHostClosed: boolean;
+  browserCleanupError: string | null;
+  browserNoticeEmitted: boolean;
+  browserScope: { workspacePath: string; workspaceKey: string } | null;
   // B2 correlation state: one pending completion at most, settled only after
   // the turn binding exists or the bounded compat window expires.
   rpcAcceptedAt: string | null;
@@ -113,6 +136,16 @@ interface TurnResult {
   startedAt: string | null;
   completedAt: string;
   rpcAcceptedAt: string | null;
+  /** ADR-008: captured turn text over MAX_CAPTURE_CHARS is bounded and flagged. */
+  responseTruncated: boolean;
+}
+
+interface ResolvedBrowserConfig {
+  mode: BrowserHostMode;
+  executablePath?: string;
+  backendFactory?: () => Promise<BrowserControlPort>;
+  commandTimeoutMs?: number;
+  listTimeoutMs?: number;
 }
 
 export interface ZCodeAppServerAdapterOptions {
@@ -120,6 +153,8 @@ export interface ZCodeAppServerAdapterOptions {
   onEvent?: ProgressSink;
   timeoutMs?: number;
   childEnvBase?: NodeJS.ProcessEnv;
+  /** 浏览器宿主覆盖项；缺省按持久化运行配置解析（默认 off）。 */
+  browser?: AdapterBrowserOptions;
   /**
    * Home directory for persisted Bridge settings discovery. Defaults to the
    * real home; tests point it at an empty directory to stay hermetic against
@@ -139,7 +174,13 @@ export interface ZCodeAppServerAdapterOptions {
 }
 
 const RPC_TIMEOUT_MS = 30_000;
+/** ADR-008: captured turn text stays bounded at 2,000,000 characters. */
 const MAX_CAPTURE_CHARS = 2_000_000;
+/** ADR-008: complete JSON-RPC frames get an independent 16 MiB UTF-8 byte
+ * limit, separate from text capture. The production resume frame was
+ * 2,139,927 bytes; the old whole-buffer 2,000,000-char check misread it as a
+ * timeout. */
+const MAX_FRAME_BYTES = 16 * 1024 * 1024;
 
 /**
  * Runs one task in a ZCode app-server session and persists safe progress
@@ -159,6 +200,7 @@ export class ZCodeAppServerAdapter implements CodingAgentAdapter {
   readonly #onInteractionState: ZCodeAppServerAdapterOptions["onInteractionState"];
   readonly #turnBindingCompatMs: number;
   readonly #replayIdleMs: number;
+  readonly #browser: AdapterBrowserOptions | undefined;
   readonly #runs = new Map<AgentHandle, RunEntry>();
   readonly #workspaceByTask = new Map<string, string>();
 
@@ -175,6 +217,7 @@ export class ZCodeAppServerAdapter implements CodingAgentAdapter {
     this.#onInteractionState = options.onInteractionState;
     this.#turnBindingCompatMs = options.turnBindingCompatMs ?? 5_000;
     this.#replayIdleMs = options.replayIdleMs ?? 10_000;
+    this.#browser = options.browser;
   }
 
   async startTask(input: { task: TaskPackage; workspace: WorkspaceRef; attempt: number }): Promise<AgentHandle> {
@@ -299,6 +342,12 @@ export class ZCodeAppServerAdapter implements CodingAgentAdapter {
       bindingTimer: null,
       pendingTimer: null,
       replayConsecutiveFailures: 0,
+      browserConfig: null,
+      browserHost: null,
+      browserHostClosed: false,
+      browserCleanupError: null,
+      browserNoticeEmitted: false,
+      browserScope: null,
     };
     this.#runs.set(handle, entry);
     this.#workspaceByTask.set(task.task_id, workspace.canonicalPath);
@@ -394,6 +443,22 @@ export class ZCodeAppServerAdapter implements CodingAgentAdapter {
       const sessionId = nestedString(snapshot, ["session", "sessionId"]);
       if (!sessionId) throw new Error("ZCode app-server session snapshot did not contain session.sessionId");
       entry.sessionId = sessionId;
+      // ADR-007: browser scope binds to this attempt's session and workspace.
+      // The official protocol broker keys requests by
+      // workspaceIdentity ?? workspacePath of the session record; this adapter
+      // never sends a workspaceIdentity, and workspacePath is the execution
+      // directory it passed to session/create. Bind accordingly (the session
+      // snapshot's identity wins when the runtime reports one), so a worktree
+      // execution directory is not mis-keyed to the project directory.
+      const snapshotWorkspace = asRecord(asRecord(snapshot).workspace);
+      const reportedIdentity = typeof snapshotWorkspace.workspaceIdentity === "string" && snapshotWorkspace.workspaceIdentity.trim()
+        ? snapshotWorkspace.workspaceIdentity.trim()
+        : null;
+      entry.browserScope = {
+        workspacePath: workspace.canonicalPath,
+        workspaceKey: reportedIdentity ?? workspace.canonicalPath,
+      };
+      entry.browserConfig = this.#resolveBrowserConfig(runtimeEnv);
       let selectedReasoningLevel: string | null = null;
       if (preferences.model) {
         const availableModels = readAvailableModels(snapshot);
@@ -628,7 +693,7 @@ export class ZCodeAppServerAdapter implements CodingAgentAdapter {
           response: turnResult.response,
           usage: turnResult.usage,
           timedOut: false,
-          stdoutTruncated: false,
+          stdoutTruncated: turnResult.responseTruncated,
           stderrTruncated: false,
           agentReport: null,
           reportCandidate: null,
@@ -655,7 +720,7 @@ export class ZCodeAppServerAdapter implements CodingAgentAdapter {
           response: turnResult.response,
           usage: turnResult.usage,
           timedOut: false,
-          stdoutTruncated: false,
+          stdoutTruncated: turnResult.responseTruncated,
           stderrTruncated: false,
           agentReport: null,
           reportCandidate: parsedUnknown.candidate,
@@ -674,7 +739,7 @@ export class ZCodeAppServerAdapter implements CodingAgentAdapter {
         const base = {
         attempts: 1,
         cancelled: false,
-        stdoutTruncated: false,
+        stdoutTruncated: turnResult.responseTruncated,
         stderrTruncated: false,
         stdout,
         stderr: "",
@@ -733,18 +798,31 @@ export class ZCodeAppServerAdapter implements CodingAgentAdapter {
       } catch (error) {
         entry.onEvent({ type: "desktop_status_sync_failed", summary: error instanceof Error ? error.message : String(error) });
       }
+      // The browser host belongs to this attempt; close it before the
+      // app-server so its bounded teardown is reported independently. The
+      // final cleanup verdict combines both resources: a browser that could
+      // not be closed keeps the outcome unverified even when the app-server
+      // itself exited cleanly.
+      await this.#closeBrowserHost(entry);
       try {
         await client.close();
         entry.child = null;
-        outcome = { ...outcome, cleanupVerified: true };
+        if (entry.browserCleanupError) {
+          outcome = { ...outcome, cleanupError: `Managed browser cleanup could not be verified: ${entry.browserCleanupError}`, cleanupVerified: false };
+        } else {
+          outcome = { ...outcome, cleanupVerified: true };
+        }
         try { this.#onOutcomeCheckpoint?.(outcome); }
         catch (error) {
           entry.onEvent({ type: "outcome_checkpoint_failed", summary: error instanceof Error ? error.message : String(error) });
         }
       } catch (error) {
         const cleanupError = error instanceof Error ? error.message : String(error);
-        entry.onEvent({ type: "cleanup_unverified", summary: cleanupError.slice(0, 1_500), details: { pid: client.child.pid } });
-        outcome = { ...outcome, cleanupError, cleanupVerified: false };
+        const combined = entry.browserCleanupError
+          ? `${cleanupError} (managed browser cleanup also unverified: ${entry.browserCleanupError})`
+          : cleanupError;
+        entry.onEvent({ type: "cleanup_unverified", summary: combined.slice(0, 1_500), details: { pid: client.child.pid } });
+        outcome = { ...outcome, cleanupError: combined, cleanupVerified: false };
         try { this.#onOutcomeCheckpoint?.(outcome); }
         catch (checkpointError) {
           entry.onEvent({ type: "outcome_checkpoint_failed", summary: checkpointError instanceof Error ? checkpointError.message : String(checkpointError) });
@@ -754,11 +832,20 @@ export class ZCodeAppServerAdapter implements CodingAgentAdapter {
     } catch (error) {
       await syncDesktopStatus(desktopTask, entry.cancelRequested ? null : "error", entry.onEvent);
       entry.abort.abort();
+      await this.#closeBrowserHost(entry);
       try {
         if (entry.client) await entry.client.close();
         else if (entry.child?.pid) await terminateProcessTree(entry.child.pid);
       } catch (cleanupError) {
-        throw new BridgeError("cleanup_failed", "ZCode process termination could not be verified; workspace remains occupied", { cause: cleanupError });
+        const browserSuffix = entry.browserCleanupError ? ` Managed browser cleanup is also unverified: ${entry.browserCleanupError}` : "";
+        throw new BridgeError("cleanup_failed", `ZCode process termination could not be verified; workspace remains occupied.${browserSuffix}`, { cause: cleanupError });
+      }
+      if (entry.browserCleanupError) {
+        throw new BridgeError(
+          "cleanup_failed",
+          `ZCode process termination was verified, but the managed browser cleanup could not be verified: ${entry.browserCleanupError}`,
+          { cause: error },
+        );
       }
       entry.child = null;
       const baseMessage = error instanceof Error ? error.message : String(error);
@@ -795,6 +882,33 @@ export class ZCodeAppServerAdapter implements CodingAgentAdapter {
     let rpcId = 0;
     let closed = false;
     const pending = new Map<string | number, PendingRpc>();
+    // ADR-008: a fatal wire-format failure ends every pending RPC and the turn
+    // wait immediately, stops buffering, and reports stable reason + safe size
+    // fields — never the frame content. The first fatal reason is latched: it
+    // rejects every later request too, so the protocol error surfaces instead
+    // of being masked by an RPC or wall-clock timeout. Until then frames are
+    // consumed one newline-delimited line at a time; the sum of coalesced
+    // frames is never treated as a single frame.
+    let protocolFatal: Error | null = null;
+    const failProtocol = (code: "frame_over_limit" | "invalid_frame", frameBytes: number, cause?: unknown, detail?: string): void => {
+      if (protocolFatal) return;
+      const message = code === "frame_over_limit"
+        ? `ZCode app-server protocol frame exceeded the 16 MiB UTF-8 limit (observed ${frameBytes} bytes, limit ${MAX_FRAME_BYTES} bytes)`
+        : `ZCode app-server protocol stream delivered an invalid JSON frame (${frameBytes} bytes)${detail ? `: ${detail}` : ""}`;
+      protocolFatal = cause === undefined ? new Error(message) : new Error(message, { cause });
+      stdoutBuffer = "";
+      for (const call of pending.values()) {
+        clearTimeout(call.timer);
+        call.reject(new Error(`${message}; ended pending ${call.method} request`));
+      }
+      pending.clear();
+      entry.onEvent({
+        type: "protocol_error",
+        summary: message,
+        details: { error_code: code, frame_bytes: frameBytes, limit_bytes: MAX_FRAME_BYTES },
+      });
+      entry.rejectTurn(protocolFatal);
+    };
     entry.abort.signal.addEventListener("abort", () => {
       for (const call of pending.values()) { clearTimeout(call.timer); call.reject(new Error("ZCode task attempt ended")); }
       pending.clear();
@@ -802,22 +916,56 @@ export class ZCodeAppServerAdapter implements CodingAgentAdapter {
 
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
+    // Browser reverse-RPC replies settle asynchronously and may race the
+    // attempt's stdin teardown after cancel/timeout; a late write must fail
+    // silently instead of raising an unhandled stream error.
+    child.stdin.on("error", () => undefined);
     child.stdout.on("data", (chunk: string) => {
+      if (protocolFatal) return;
       stdoutBuffer += chunk;
-      if (stdoutBuffer.length > MAX_CAPTURE_CHARS) { entry.rejectTurn(new Error("ZCode protocol frame exceeded size limit")); return; }
       let newline: number;
       while ((newline = stdoutBuffer.indexOf("\n")) >= 0) {
-        const line = stdoutBuffer.slice(0, newline).trim();
+        const rawLine = stdoutBuffer.slice(0, newline);
         stdoutBuffer = stdoutBuffer.slice(newline + 1);
+        // The limit is judged on the raw untrimmed frame bytes (ADR-008): a
+        // frame padded past the limit with whitespace must not shrink below
+        // it through trimming.
+        const frameBytes = Buffer.byteLength(rawLine, "utf8");
+        if (frameBytes > MAX_FRAME_BYTES) {
+          failProtocol("frame_over_limit", frameBytes);
+          return;
+        }
+        const line = rawLine.trim();
         if (!line) continue;
+        let parsed: unknown;
         try {
-          const message = JSON.parse(line) as JsonRecord;
+          parsed = JSON.parse(line);
+        } catch (error) {
+          failProtocol("invalid_frame", frameBytes, error);
+          return;
+        }
+        // A JSON-RPC frame's top level must be an object; null, arrays, and
+        // scalars are wire-format defects, not handler inputs (ADR-008).
+        if (!isRecord(parsed)) {
+          failProtocol("invalid_frame", frameBytes, undefined, "the top-level frame value must be a JSON object");
+          return;
+        }
+        const message = parsed;
+        try {
           this.#handleMessage(message, entry, pending, config, (reply) => {
             child.stdin.write(`${JSON.stringify(reply)}\n`);
           });
         } catch (error) {
-          entry.rejectTurn(new Error("invalid ZCode app-server protocol message", { cause: error }));
+          // Handler failures are runtime errors, not wire-format defects; they
+          // end the turn without condemning the transport.
+          entry.rejectTurn(error instanceof Error ? error : new Error(String(error)));
         }
+      }
+      // An unterminated frame already over the limit must fail now, not when a
+      // newline (or the RPC timeout) ever arrives.
+      if (!protocolFatal) {
+        const bufferedBytes = Buffer.byteLength(stdoutBuffer, "utf8");
+        if (bufferedBytes > MAX_FRAME_BYTES) failProtocol("frame_over_limit", bufferedBytes);
       }
     });
     child.stderr.on("data", (chunk: string) => {
@@ -843,6 +991,10 @@ export class ZCodeAppServerAdapter implements CodingAgentAdapter {
 
     const request = (method: string, params: JsonRecord): Promise<unknown> => {
       if (entry.abort.signal.aborted) return Promise.reject(new Error("ZCode task attempt ended"));
+      // A latched fatal protocol reason blocks every later request, so the
+      // original wire-format failure surfaces instead of a later timeout
+      // (ADR-008).
+      if (protocolFatal) return Promise.reject(new Error(`${protocolFatal.message}; blocked ${method} request after the fatal protocol error`));
       if (closed) return Promise.reject(new Error(`ZCode app-server is closed before ${method}`));
       const id = ++rpcId;
       return new Promise((resolve, reject) => {
@@ -1016,6 +1168,12 @@ export class ZCodeAppServerAdapter implements CodingAgentAdapter {
       if (state) entry.onEvent({ type: "runtime_state", summary: `ZCode runtime state: ${state}` });
       return;
     }
+    if (message.method === "interaction/browserList" || message.method === "interaction/browserExecute") {
+      if (typeof message.id === "string" || typeof message.id === "number") {
+        this.#handleBrowserRequest(message, entry, write);
+      }
+      return;
+    }
     if (message.id !== undefined && typeof message.method === "string") {
       write({ id: message.id, error: { code: -32601, message: `Unsupported ZCode app-server request: ${message.method}` } });
     }
@@ -1086,6 +1244,148 @@ export class ZCodeAppServerAdapter implements CodingAgentAdapter {
     })().catch(() => entry.rejectTurn(new Error("ZCode interaction delivery failed")));
   }
 
+  /** ADR-007 browser host: resolve config, validate scope, dispatch, clean up. */
+  #resolveBrowserConfig(env: NodeJS.ProcessEnv): ResolvedBrowserConfig {
+    const override = this.#browser;
+    const rawMode = override?.mode ?? env["ZCODE_BRIDGE_BROWSER_USE"]?.trim() ?? "";
+    let mode: BrowserHostMode;
+    if (rawMode === "" || rawMode === "off") mode = "off";
+    else if (rawMode === "headless") mode = "headless";
+    else mode = "off";
+    const executablePath = override?.executablePath ?? (env["ZCODE_BRIDGE_BROWSER_EXECUTABLE"]?.trim() || undefined);
+    return {
+      mode,
+      ...(executablePath ? { executablePath } : {}),
+      ...(override?.backendFactory ? { backendFactory: override.backendFactory } : {}),
+      ...(override?.commandTimeoutMs !== undefined ? { commandTimeoutMs: override.commandTimeoutMs } : {}),
+      ...(override?.listTimeoutMs !== undefined ? { listTimeoutMs: override.listTimeoutMs } : {}),
+    };
+  }
+
+  #browserHostFor(entry: RunEntry): BrowserHost | null {
+    if (!entry.browserConfig) return null;
+    if (entry.browserHost) return entry.browserHost;
+    const config = entry.browserConfig;
+    const options: BrowserHostOptions = {
+      mode: config.mode,
+      ...(config.executablePath ? { executablePath: config.executablePath } : {}),
+      backendFactory: config.backendFactory
+        ?? createDefaultBrowserBackendFactory({ ...(config.executablePath ? { executablePath: config.executablePath } : {}) }),
+      ...(config.commandTimeoutMs !== undefined ? { commandTimeoutMs: config.commandTimeoutMs } : {}),
+      ...(config.listTimeoutMs !== undefined ? { listTimeoutMs: config.listTimeoutMs } : {}),
+    };
+    entry.browserHost = createBrowserHost(options, (event) => {
+      entry.onEvent({ type: event.type, summary: event.summary, ...(event.details ? { details: event.details } : {}) });
+    });
+    return entry.browserHost;
+  }
+
+  #browserScopeAllows(entry: RunEntry, params: BrowserListParams | BrowserExecuteParams): boolean {
+    if (params.sessionId !== entry.sessionId) return false;
+    const scope = entry.browserScope;
+    if (scope) {
+      if (params.workspacePath !== undefined && !sameWorkspacePath(params.workspacePath, scope.workspacePath)) return false;
+      if (params.workspaceKey !== undefined && !sameWorkspacePath(params.workspaceKey, scope.workspaceKey)) return false;
+    }
+    if (entry.turnId && params.turnId && entry.turnId !== params.turnId) return false;
+    return true;
+  }
+
+  #handleBrowserRequest(message: JsonRecord, entry: RunEntry, write: (message: JsonRecord) => void): void {
+    const rpcId = message.id as string | number;
+    const method = message.method as "interaction/browserList" | "interaction/browserExecute";
+    void (async () => {
+      if (entry.browserHostClosed || entry.abort.signal.aborted) {
+        if (method === "interaction/browserList") {
+          write({ id: rpcId, error: { code: -32000, message: "Bridge browser host is closed for this task attempt" } });
+        } else {
+          write({ id: rpcId, result: browserHostClosedResult() });
+        }
+        return;
+      }
+      const parsed = method === "interaction/browserList"
+        ? browserListParamsSchema.safeParse(asRecord(message.params))
+        : browserExecuteParamsSchema.safeParse(asRecord(message.params));
+      if (!parsed.success) {
+        write({ id: rpcId, error: { code: -32602, message: `Invalid ${method} params: ${zodIssueSummary(parsed.error)}` } });
+        return;
+      }
+      const params: BrowserListParams | BrowserExecuteParams = parsed.data;
+      if (!this.#browserScopeAllows(entry, params)) {
+        // Scope refusals never leak which session/workspace is active.
+        if (method === "interaction/browserList") {
+          write({ id: rpcId, error: { code: -32000, message: "Browser request does not belong to the active task session" } });
+        } else {
+          write({ id: rpcId, result: {
+            ok: false,
+            error: { code: "backend_unavailable", message: "Browser request does not belong to the active task session" },
+            elapsedMs: 0,
+          } });
+        }
+        return;
+      }
+      const host = this.#browserHostFor(entry);
+      if (!host) {
+        // No session binding (should not happen post-session/create): refuse.
+        if (method === "interaction/browserList") {
+          write({ id: rpcId, error: { code: -32000, message: "Browser host is not bound to a task session" } });
+        } else {
+          write({ id: rpcId, result: browserHostClosedResult() });
+        }
+        return;
+      }
+      if (host.mode === "off" && !entry.browserNoticeEmitted) {
+        entry.browserNoticeEmitted = true;
+        entry.onEvent({
+          type: "browser_host_disabled",
+          summary: "ZCode requested browser access; the Bridge browser host is disabled by default (ZCODE_BRIDGE_BROWSER_USE=off)",
+        });
+      }
+      if (method === "interaction/browserList") {
+        if (paramsHasCommand(params)) {
+          write({ id: rpcId, error: { code: -32602, message: "Invalid interaction/browserList params: unexpected execute fields" } });
+          return;
+        }
+        const outcome = await host.handleList(params, entry.abort.signal);
+        if (outcome.kind === "ok") write({ id: rpcId, result: { browsers: outcome.browsers } });
+        else write({ id: rpcId, error: { code: -32000, message: outcome.message } });
+        return;
+      }
+      if (!paramsHasCommand(params)) {
+        write({ id: rpcId, error: { code: -32602, message: "Invalid interaction/browserExecute params: missing browserId/browserGeneration/command" } });
+        return;
+      }
+      const result = await host.handleExecute(params, entry.abort.signal);
+      write({ id: rpcId, result });
+    })().catch((error: unknown) => {
+      const messageText = error instanceof Error ? error.message : String(error);
+      if (method === "interaction/browserList") {
+        write({ id: rpcId, error: { code: -32000, message: `Browser host request failed: ${messageText.slice(0, 300)}` } });
+      } else {
+        write({ id: rpcId, result: {
+          ok: false,
+          error: { code: "execution_error", message: `Browser host request failed: ${messageText.slice(0, 300)}` },
+          elapsedMs: 0,
+        } });
+      }
+    });
+  }
+
+  async #closeBrowserHost(entry: RunEntry): Promise<void> {
+    if (!entry.browserHost || entry.browserHostClosed) return;
+    entry.browserHostClosed = true;
+    try {
+      const outcome = await entry.browserHost.close();
+      if (!outcome.closed) {
+        entry.browserCleanupError = outcome.error ?? "browser close could not be verified";
+      }
+    } catch (error) {
+      entry.browserCleanupError = error instanceof Error ? error.message : String(error);
+    }
+    // The host emits its own verified/unverified close events; this adapter
+    // only records the fact for the final outcome merge.
+  }
+
   /** Settles a completion that was held in the pending boundary. */
   #settlePendingCompletion(entry: RunEntry): void {
     if (entry.pendingTimer) { clearTimeout(entry.pendingTimer); entry.pendingTimer = null; }
@@ -1105,17 +1405,22 @@ export class ZCodeAppServerAdapter implements CodingAgentAdapter {
   }
 
   /** Single settle path for turn completions; resultType is validated here so
-   * an unknown terminal is never mistaken for success (B2). */
+   * an unknown terminal is never mistaken for success (B2). Captured text
+   * keeps the 2,000,000-character boundary with an explicit truncation flag
+   * (ADR-008); the full text has already streamed through model_output events
+   * up to the event-log capacity. */
   #resolveTurnCompleted(entry: RunEntry, payload: JsonRecord, event: JsonRecord): void {
     if (entry.turnBinding === "pending") entry.turnBinding = entry.turnId ? "strict" : "compat";
+    const rawResponse = typeof payload.response === "string" ? payload.response : "";
     entry.resolveTurn({
-      response: typeof payload.response === "string" ? payload.response : "",
+      response: rawResponse.length > MAX_CAPTURE_CHARS ? rawResponse.slice(0, MAX_CAPTURE_CHARS) : rawResponse,
       usage: publicUsage(payload.usage),
       resultType: typeof payload.resultType === "string" ? payload.resultType : null,
       binding: entry.turnBinding,
       startedAt: entry.turnStartedAt,
       completedAt: entry.turnCompletedAt ?? this.#now().toISOString(),
       rpcAcceptedAt: entry.rpcAcceptedAt,
+      responseTruncated: rawResponse.length > MAX_CAPTURE_CHARS,
     });
     void event;
   }
@@ -1225,6 +1530,34 @@ function interactionDecline(
   return method === "interaction/requestPermission"
     ? { decision: "deny", reason }
     : { action: "decline", reason };
+}
+
+function browserHostClosedResult(): Record<string, unknown> {
+  return {
+    ok: false,
+    error: { code: "backend_unavailable", message: "Bridge browser host is closed for this task attempt" },
+    elapsedMs: 0,
+  };
+}
+
+/** 工作区路径比较按平台归一大小写；browser scope 拒绝不区分分隔符风格。 */
+function sameWorkspacePath(left: string, right: string): boolean {
+  const normalize = (value: string): string => path.normalize(value).replace(/[/\\]+/gu, (match) => (match.includes("\\") || process.platform === "win32" ? "\\" : "/"));
+  const resolvedLeft = normalize(left);
+  const resolvedRight = normalize(right);
+  return process.platform === "win32"
+    ? resolvedLeft.toLocaleLowerCase("en-US") === resolvedRight.toLocaleLowerCase("en-US")
+    : resolvedLeft === resolvedRight;
+}
+
+function zodIssueSummary(error: { issues: ReadonlyArray<{ path: PropertyKey[]; message: string }> }): string {
+  const first = error.issues[0];
+  if (!first) return "validation failed";
+  return `${first.path.map((part) => String(part)).join(".")}: ${first.message}`.slice(0, 300);
+}
+
+function paramsHasCommand(params: BrowserListParams | BrowserExecuteParams): params is BrowserExecuteParams {
+  return (params as BrowserExecuteParams).command !== undefined;
 }
 
 function readSelectedModel(snapshot: JsonRecord): string | null {

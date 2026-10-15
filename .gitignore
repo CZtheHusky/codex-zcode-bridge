@@ -12,3 +12,10 @@ plugins/codex-zcode-bridge/.mcp.local.json
 !.env.example
 # Documentation is versioned by default. Scratch material belongs in docs/_draft/.
 docs/_draft/
+
+# Browser host repair task evidence (logs, screenshots); not part of the plugin.
+.browser-host-evidence/
+
+# session-resume-payload live verification artifacts (private data roots, fixtures, logs)
+.test-build/
+/local/

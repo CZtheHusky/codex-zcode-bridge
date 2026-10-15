@@ -732,15 +732,40 @@ export class BridgeTaskManager implements ProgressTaskManager {
       if (status.status !== "running") {
         throw new TaskManagerError("TASK_STATE", `ZCode interaction can only be answered while the task is running (status: ${status.status})`);
       }
-      const record = this.#store.readInteractionRequest(input.task_id, input.request_id);
-      if (!record) throw new TaskManagerError("TASK_NOT_FOUND", `unknown ZCode interaction request: ${input.request_id}`);
+      let record: ReturnType<TaskStore["readInteractionRequest"]>;
+      try {
+        const read = this.#store.readInteractionRequest(input.task_id, input.request_id);
+        if (!read) throw new TaskManagerError("TASK_NOT_FOUND", `unknown ZCode interaction request: ${input.request_id}`);
+        record = read;
+      } catch (error) {
+        if (error instanceof TaskManagerError) throw error;
+        // Corrupt full-request records are never treated as authorization
+        // (ADR-008); the explicit reason replaces a raw filesystem error.
+        throw new TaskManagerError(
+          "TASK_STATE",
+          `ZCode interaction request ${input.request_id} could not be read: the persisted full request is unreadable or corrupt`,
+        );
+      }
       if (record.state === "answered") {
         throw new TaskManagerError("TASK_STATE", `ZCode interaction request ${input.request_id} was already answered`);
       }
       const answer = buildInteractionAnswer(record, input);
-      const state = this.#store.answerInteractionRequest(input.task_id, input.request_id, answer, this.#now().toISOString());
-      if (state !== "answered") {
+      // ADR-008: an approval may only be recorded when the full request it
+      // refers to is available and consistent; damaged or edited records
+      // cannot count as granted authorization. The check runs under the same
+      // interaction lock as the answer write, so the verified record is
+      // exactly the one the answer lands on.
+      const answered = input.decision === "allow" || input.decision === "accept"
+        ? this.#store.answerInteractionRequestVerified(input.task_id, input.request_id, answer, { requireIntegrity: true }, this.#now().toISOString())
+        : { state: this.#store.answerInteractionRequest(input.task_id, input.request_id, answer, this.#now().toISOString()) } as const;
+      if (answered.state === "already_answered") {
         throw new TaskManagerError("TASK_STATE", `ZCode interaction request ${input.request_id} was already answered`);
+      }
+      if (answered.state === "integrity_failed") {
+        throw new TaskManagerError(
+          "TASK_STATE",
+          `ZCode interaction request ${input.request_id} cannot be approved: ${answered.reason}; the approval was not recorded as granted`,
+        );
       }
       this.#store.appendEvent(input.task_id, "interaction_reply_submitted", "the calling host submitted a response to the ZCode interaction", {
         request_id: input.request_id,
