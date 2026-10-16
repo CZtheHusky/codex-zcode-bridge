@@ -1103,7 +1103,11 @@ var WINDOWS_OS_ENV = /* @__PURE__ */ new Set([
   "PROGRAMDATA",
   "OS",
   "PROCESSOR_ARCHITECTURE",
-  "NUMBER_OF_PROCESSORS"
+  "NUMBER_OF_PROCESSORS",
+  // Non-sensitive system install directories; browser auto-discovery resolves
+  // system Chrome/Edge under these roots (src/browser/executable.ts).
+  "PROGRAMFILES",
+  "PROGRAMFILES(X86)"
 ]);
 var POSIX_OS_ENV = /* @__PURE__ */ new Set([
   "PATH",

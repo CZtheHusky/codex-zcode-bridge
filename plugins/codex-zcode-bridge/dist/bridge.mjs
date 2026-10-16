@@ -23565,7 +23565,11 @@ var WINDOWS_OS_ENV = /* @__PURE__ */ new Set([
   "PROGRAMDATA",
   "OS",
   "PROCESSOR_ARCHITECTURE",
-  "NUMBER_OF_PROCESSORS"
+  "NUMBER_OF_PROCESSORS",
+  // Non-sensitive system install directories; browser auto-discovery resolves
+  // system Chrome/Edge under these roots (src/browser/executable.ts).
+  "PROGRAMFILES",
+  "PROGRAMFILES(X86)"
 ]);
 var POSIX_OS_ENV = /* @__PURE__ */ new Set([
   "PATH",
@@ -23600,6 +23604,10 @@ function createWorkerEnv(source) {
     "ZCODE_BRIDGE_DEFAULT_REASONING_LEVEL",
     "ZCODE_BRIDGE_MODE",
     "ZCODE_BRIDGE_TIMEOUT_MS",
+    // Env-only browser configuration (ADR-007): non-secret strings the worker's
+    // adapter reads from its own environment when no persisted setting exists.
+    "ZCODE_BRIDGE_BROWSER_USE",
+    "ZCODE_BRIDGE_BROWSER_EXECUTABLE",
     "ZCODE_HOME",
     "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE",
     "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE",

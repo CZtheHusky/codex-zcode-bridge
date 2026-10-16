@@ -1,6 +1,7 @@
 import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { buildRepoRootLeakPattern } from "./lib/repo-root-pattern.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pluginRoot = path.join(root, "plugins", "codex-zcode-bridge");
@@ -59,7 +60,7 @@ for (const relativePath of [
 // the vendored CommonJS backend, which resolves its registry data relative to
 // its own directory (module-label comments inside the bundle legitimately
 // mention the packaging path and are not an external dependency).
-const repoRootPattern = new RegExp(root.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&").replace(/\\/gu, "[/\\\\]"), "iu");
+const repoRootPattern = buildRepoRootLeakPattern(root);
 for (const relativePath of ["dist/bridge.mjs", "worker/worker-main.mjs", "worker/vendor/pkg/browser-host.cjs"]) {
   const bundle = await readFile(path.join(pluginRoot, relativePath), "utf8");
   if (repoRootPattern.test(bundle)) {

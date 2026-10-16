@@ -32,8 +32,21 @@ const MAC_BROWSER_PATHS = [
   "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
 ];
 
+/**
+ * Windows environment keys are case-insensitive; the forwarded worker env
+ * preserves the parent's original casing (e.g. `ProgramFiles`), so discovery
+ * must not depend on one spelling.
+ */
+function windowsEnvValue(env: NodeJS.ProcessEnv, key: string): string | undefined {
+  const wanted = key.toUpperCase();
+  for (const [name, value] of Object.entries(env)) {
+    if (name.toUpperCase() === wanted && value !== undefined && value !== "") return value;
+  }
+  return undefined;
+}
+
 function windowsBrowserPaths(env: NodeJS.ProcessEnv): string[] {
-  return [env.PROGRAMFILES, env["PROGRAMFILES(X86)"], env.LOCALAPPDATA]
+  return [windowsEnvValue(env, "PROGRAMFILES"), windowsEnvValue(env, "PROGRAMFILES(X86)"), windowsEnvValue(env, "LOCALAPPDATA")]
     .filter((root): root is string => Boolean(root?.trim()))
     .flatMap((root) => [
       join(root, "Google", "Chrome", "Application", "chrome.exe"),
