@@ -1,8 +1,9 @@
 # 当前接口与兼容边界
 
 > Status: AUTHORITATIVE
-> Last updated: 2026-10-14
-> Last verified: 2026-10-14，用量额度耗尽分类定向测试、类型检查和构建通过；完整测试有 1 项 Windows 锁并发用例首次报 EPERM、单独复跑通过；真实 provider 错误字段兼容仍 NOT RUN。
+> Last updated: 2026-10-15
+> Last verified: 2026-10-15，最新上游整合分支的验证结果见[审查说明](reports/2026-10-15-browser-and-transport-fixes.md)；旧版本实测与当前分支回归分别记录。
+> Verified against: 上游fae74e45033a50fb560c0014d1a6d60a7dc771d1 + 本分支修复；受测源码指纹见审查说明。
 
 准确类型与 schema 以 `src/interfaces.ts` 和 `src/mcp/schemas.ts` 为准。核心公共入口见 [SHARED_CORE.md](SHARED_CORE.md)。历史源码注释中的 V0.1/FROZEN 是沿革说明，不代表当前新增功能已经冻结。
 
@@ -22,8 +23,14 @@ zcode_events 使用单调 seq cursor、limit 1–200、wait_ms 0–25,000、raw/
 
 zcode_interaction_reply 必须引用当前 attempt 的 interaction_requested.request_id，不能复用旧 ID。permission 只接受 allow/deny；user input 接受 accept/decline，answers 以完整问题文本为键。工具 schema 与 TaskManager 校验回答长度、支持的问题和允许选项。任务约束与路径声明不是 OS 权限控制。
 
+大审批输入事件与完整性边界（ADR-008）：审批 params 完整私有保存至 1 MiB UTF-8 bytes（计量单位是 `JSON.stringify(params)` 的紧凑序列化，不是整个 JSON 记录文件）。单事件行仍守 64,000 bytes：小请求保持既有完整字段形状；超限请求发布为 `preview: true` 的有界预览（`input_preview`、`input_bytes`、可选 `questions_preview`/`options_preview`），并附 `full_request` 引用（同任务/attempt 私有记录的 `file` 路径、`bytes`、`sha256`）。`bytes`/`sha256` 对应上述序列化 params，宿主复核时用同一单位，且预览不是全文，需要全文必须读引用记录。allow/accept 在 interaction 锁内校验记录与字节/哈希一致后落盘：完全无新元数据且 <=旧 32,000-byte 上限的记录按 legacy 兼容；缺/错类型元数据、不匹配、或验证时超过 1 MiB 的一律返回 TASK_STATE 且不记为已授权。等待中记录消失、损坏或与最初请求不一致时 worker 明确 decline（`interaction_request_undeliverable` 事件，`interaction_record_missing`/`interaction_record_unreadable`/`interaction_record_mismatch`），不悬挂轮询。超过 1 MiB 的请求以 `interaction_request_oversized` 事件（actual/limit）明确拒绝并建议拆分输入。SHA256/bytes 是损坏与意外改动的核对手段，不是对同 OS 账户恶意篡改的安全隔离。
+
+协议帧边界（ADR-008）：app-server stdout 的完整 JSON-RPC 帧按换行逐条消费，单帧上限 16 MiB 原始未 trim 的 UTF-8 字节；帧顶层必须是 JSON 对象。越限、坏 JSON 或非对象帧为致命协议错误（`protocol_error` 事件，含 error_code 与安全大小字段），锁存首个原因、结束全部 pending RPC 与 turn、阻止后续 request；模型文本捕获保持独立的 2,000,000 字符上限与截断标志。该行为不改变任何 MCP 工具名与 schema。
+
 稳定错误包括 TASK_INVALID、TASK_ALREADY_EXISTS、TASK_ID_CONFLICT、CONTINUE_OPERATION_CONFLICT、BRIDGE_BUSY、REQUEST_QUEUE_TIMEOUT、TASK_NOT_FOUND、TASK_NOT_FINISHED、TASK_STATE、CANCEL_FAILED，以及 runtime/provider、timeout、invalid_agent_report 等执行错误。明确匹配到 ZCode provider 用量额度耗尽错误时，任务保留 `failed` 语义并使用 `error_code: "zcode_usage_exhausted"`；仅当 runtime 错误字段含明确 quota/usage exhaustion 标记才使用该码，HTTP 429、一般限流和未知错误仍为 `zcode_nonzero_exit`。该错误结果说明当前执行已中断，Codex 应立即停止当前任务并告知用户，不继续工作、不自动重试或续作，并等待用户确认额度恢复。相同 task_id 与相同任务内容会重放首次回执；不同内容返回 TASK_ID_CONFLICT。超时后使用原 task_id 查询或重试，不要换 ID。续作可传 operation_id；相同 ID 与相同反馈会重放回执，不同反馈返回 CONTINUE_OPERATION_CONFLICT。cleanup_failed 表示运行时清理未验证，任务保持目录占用；再次 zcode_cancel 尝试清理后保留原执行结果。
 
 公开进度 usage 仅保留数值 token/cost 字段，隐藏推理、未知 metadata 和原始 RPC error 不转发。审批需要的工具输入、任务 prompt、可见回答、私有本地日志仍属于可能含敏感内容的任务证据，使用者须按本地数据策略管理。
 
 控制面、权威状态与补充观察的边界见 [ADR-004](decisions/ADR-004-separate-control-state-and-observation.md)：ZCode 本地 metadata、rollout 与日志可以进入补充观察，但不得单独决定任务状态、状态迁移或恢复结论；Desktop `tasks-index.sqlite` 是登记过的 best-effort 集成例外。
+
+可选浏览器宿主（ADR-007）只新增反向 RPC，不改任何公开 MCP 工具名与 schema：app-server 的 `interaction/browserList` 回 `{ browsers: [] }`（关闭时的正确表达）或单个 cdp descriptor；`interaction/browserExecute` 回官方 BrowserCommandResult（含结构化 error、sideEffect none/uncertain 与 elapsedMs）。host 端参数解析保持身份字段（requestId/sessionId）必填、咨询字段（workspace/clientMode 等）可选并剥未知键；跨 session、workspacePath/workspaceKey 与绑定不符、turnId 冲突、重复在途 requestId、stale browserId/generation、非法命令分别得到拒绝或结构化错误，不再落入通用 Unsupported。浏览器事件仅含生命周期与错误码（browser_host_started/disabled/launch_failed/closed、browser_cleanup_unverified），不记录 URL、标题、页面内容、截图、auth 或 CDP endpoint。浏览器清理与 app-server 清理共同决定最终 cleanupVerified；任一未验证即保持 cleanup_failed 语义。桌面 IAB、Computer Use、录制、用户 tab 认领与子会话派生不在合同内，descriptor 以 apiSupportOverrides 如实隐藏。1.2.3修复版本已做限定live模型链路验收；本分支及跨app-server版本范围见审查说明。

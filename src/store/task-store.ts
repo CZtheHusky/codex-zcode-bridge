@@ -98,12 +98,43 @@ export interface BoundedEventsRead {
 
 const TASK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const DEFAULT_MAX_LOG_BYTES = 10 * 1024 * 1024;
+/**
+ * ADR-008: sanitized interaction params persist completely up to 1 MiB UTF-8
+ * bytes (serialized params unit). Above it the write is rejected with the
+ * actual and limit sizes so the caller can split the input; the old 32,000
+ * byte limit silently undeliverable >32KB Write approvals.
+ */
+export const MAX_INTERACTION_PARAMS_BYTES = 1024 * 1024;
+/** ADR-008: records written before the integrity metadata existed carry no
+ * params_bytes/params_sha256 and were bounded by the old store limit; only
+ * that exact small shape stays legacy-compatible during verification. */
+const LEGACY_INTERACTION_PARAMS_BYTES = 32_000;
+const SHA256_HEX_PATTERN = /^[0-9a-f]{64}$/u;
+
+/** ADR-008: explicit, recoverable rejection for interaction params over the
+ * persistence limit. Carries safe size fields only, never the payload. */
+export class InteractionRequestTooLargeError extends Error {
+  readonly actualBytes: number;
+  readonly limitBytes: number;
+  constructor(actualBytes: number, limitBytes: number) {
+    super(
+      `ZCode interaction request exceeded the ${limitBytes}-byte persistence limit `
+        + `(actual ${actualBytes} UTF-8 bytes); split the tool input into smaller parts and retry`,
+    );
+    this.name = "InteractionRequestTooLargeError";
+    this.actualBytes = actualBytes;
+    this.limitBytes = limitBytes;
+  }
+}
 const MAX_CRITICAL_EVENT_RESERVE_BYTES = 256 * 1024;
 const CRITICAL_EVENT_TYPES = new Set([
   "error", "task_finished", "turn_completed", "report_ready", "session_ready",
   "turn_started", "worker_started", "workspace_ready", "timeout_warning", "model_catalog",
   "account_provider_sync_failed", "interaction_requested", "interaction_reply_submitted", "cancelled", "cancel_failed",
   "cleanup_unverified", "outcome_checkpoint_failed", "outcome_recovered",
+  // ADR-008: fatal frame failures and undeliverable approvals must survive
+  // event-log capacity pressure.
+  "protocol_error", "interaction_request_oversized", "interaction_request_undeliverable",
 ]);
 
 export interface TaskStoreOptions {
@@ -1037,18 +1068,27 @@ export class TaskStore {
     return withEventLock(path.join(this.taskDir(taskId), "interactions.lock"), () => {
       if (existsSync(file)) {
         const record = this.#readJson(file) as ZCodeInteractionRecord;
+        // Duplicate ids compare the complete normalized input, never a
+        // bounded preview (ADR-008).
         if (record.request_id !== request.request_id || record.method !== request.method || stableJson(record.params) !== stableJson(request.params)) {
           throw new Error("interaction request id collision");
         }
         return { record, created: false };
       }
-      if (Buffer.byteLength(JSON.stringify(request.params), "utf8") > 32_000) {
-        throw new Error("ZCode interaction request exceeded the 32 KB persistence limit");
+      // Byte count and hash use the serialized sanitized params — the same
+      // unit as the limit and as the full-request reference published to the
+      // calling host.
+      const serialized = JSON.stringify(request.params);
+      const bytes = Buffer.byteLength(serialized, "utf8");
+      if (bytes > MAX_INTERACTION_PARAMS_BYTES) {
+        throw new InteractionRequestTooLargeError(bytes, MAX_INTERACTION_PARAMS_BYTES);
       }
       const record: ZCodeInteractionRecord = {
         ...request,
         state: "pending",
         created_at: createdAt,
+        params_bytes: bytes,
+        params_sha256: createHash("sha256").update(serialized).digest("hex"),
       };
       this.#writeJsonAtomic(file, record);
       return { record, created: true };
@@ -1061,6 +1101,62 @@ export class TaskStore {
     const record = this.#readJson(file) as ZCodeInteractionRecord;
     if (record.request_id !== requestId) throw new Error("interaction request id hash mismatch");
     return record;
+  }
+
+  /** Absolute path of one attempt's private full-request record; referenced
+   * by bounded interaction_requested preview events (ADR-008). */
+  interactionRequestPath(taskId: string, requestId: string): string {
+    if (!requestId || requestId.length > 512) throw new Error("invalid ZCode interaction request_id");
+    return this.interactionFile(taskId, requestId);
+  }
+
+  /**
+   * ADR-008 approval guard: the full request behind an approval must be
+   * readable and consistent with its persisted byte count and SHA256 before
+   * the reply may be treated as authorization. Corrupt, missing, edited, or
+   * metadata-stripped records are reported, never accepted. Only genuinely
+   * legacy small records (no metadata at all, within the old 32,000-byte
+   * store limit) stay compatible; anything larger or partially annotated must
+   * carry complete, well-typed, matching metadata, and verification still
+   * enforces the 1 MiB persistence limit.
+   */
+  verifyInteractionRequestIntegrity(taskId: string, requestId: string): { ok: true } | { ok: false; reason: string } {
+    const file = this.interactionFile(taskId, requestId);
+    try {
+      if (!existsSync(file)) return { ok: false, reason: "the full request record is missing" };
+      const record = this.#readJson(file) as ZCodeInteractionRecord;
+      if (record.request_id !== requestId) return { ok: false, reason: "the persisted request id does not match this request" };
+      if (record.state !== "pending" && record.state !== "answered") return { ok: false, reason: "the persisted request state is unreadable" };
+      const serialized = JSON.stringify(record.params);
+      const bytes = Buffer.byteLength(serialized, "utf8");
+      if (bytes > MAX_INTERACTION_PARAMS_BYTES) {
+        return { ok: false, reason: `the full request content is ${bytes} UTF-8 bytes, over the ${MAX_INTERACTION_PARAMS_BYTES}-byte persistence limit` };
+      }
+      const hasBytes = record.params_bytes !== undefined;
+      const hasHash = record.params_sha256 !== undefined;
+      if (!hasBytes && !hasHash) {
+        if (bytes <= LEGACY_INTERACTION_PARAMS_BYTES) return { ok: true };
+        return { ok: false, reason: `the full request record carries no integrity metadata but is ${bytes} UTF-8 bytes, over the legacy ${LEGACY_INTERACTION_PARAMS_BYTES}-byte limit; it cannot be treated as a legacy record` };
+      }
+      if (!hasBytes || !hasHash) {
+        return { ok: false, reason: "the full request record has incomplete integrity metadata (byte count and SHA256 must both be present)" };
+      }
+      if (typeof record.params_bytes !== "number" || !Number.isSafeInteger(record.params_bytes) || record.params_bytes < 0) {
+        return { ok: false, reason: "the persisted byte count is not a valid non-negative integer" };
+      }
+      if (typeof record.params_sha256 !== "string" || !SHA256_HEX_PATTERN.test(record.params_sha256)) {
+        return { ok: false, reason: "the persisted SHA256 is not a valid 64-character hex digest" };
+      }
+      if (record.params_bytes !== bytes) {
+        return { ok: false, reason: "the persisted byte count does not match the full content" };
+      }
+      if (record.params_sha256 !== createHash("sha256").update(serialized).digest("hex")) {
+        return { ok: false, reason: "the persisted SHA256 does not match the full content" };
+      }
+      return { ok: true };
+    } catch {
+      return { ok: false, reason: "the full request record is unreadable or corrupt" };
+    }
   }
 
   answerInteractionRequest(
@@ -1082,6 +1178,37 @@ export class TaskStore {
         answered_at: answeredAt,
       } satisfies ZCodeInteractionRecord);
       return "answered";
+    });
+  }
+
+  /** ADR-008: approval answers verify the full request inside the same
+   * interaction lock the answer is written under, so the record checked for
+   * integrity is exactly the one the answer lands on — there is no
+   * check-then-write window where an edited record could slip through. */
+  answerInteractionRequestVerified(
+    taskId: string,
+    requestId: string,
+    answer: Record<string, unknown>,
+    options: { requireIntegrity: boolean },
+    answeredAt = new Date().toISOString(),
+  ): { state: "answered" } | { state: "already_answered" } | { state: "integrity_failed"; reason: string } {
+    const file = this.interactionFile(taskId, requestId);
+    return withEventLock(path.join(this.taskDir(taskId), "interactions.lock"), () => {
+      if (!existsSync(file)) throw new Error(`unknown ZCode interaction request: ${requestId}`);
+      const current = this.#readJson(file) as ZCodeInteractionRecord;
+      if (current.request_id !== requestId) throw new Error("interaction request id hash mismatch");
+      if (current.state === "answered") return { state: "already_answered" };
+      if (options.requireIntegrity) {
+        const integrity = this.verifyInteractionRequestIntegrity(taskId, requestId);
+        if (!integrity.ok) return { state: "integrity_failed", reason: integrity.reason };
+      }
+      this.#writeJsonAtomic(file, {
+        ...current,
+        state: "answered",
+        answer,
+        answered_at: answeredAt,
+      } satisfies ZCodeInteractionRecord);
+      return { state: "answered" };
     });
   }
 
@@ -1117,7 +1244,9 @@ export class TaskStore {
   }
 }
 
-function stableJson(value: unknown): string {
+/** Key-order-independent comparison used for duplicate-id collision checks and
+ * worker-side original-vs-persisted request comparison (ADR-008). */
+export function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
   if (value && typeof value === "object") return `{${Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`).join(",")}}`;
   return JSON.stringify(value) ?? "null";

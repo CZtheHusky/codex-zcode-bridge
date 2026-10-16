@@ -26,6 +26,36 @@ src/adapters/task-index-sync.ts. Modifications include Bridge task correlation,
 custom ZCODE_HOME path resolution, runtime schema checks, preserving Desktop-
 owned rows and titles, and best-effort session status synchronization.
 
+This product also includes software adapted from the public ZCode source at
+commit aac4755666d09fdcd70272fcf063c077a639015f (Apache-2.0), used to implement
+the optional Bridge browser host (ADR-007):
+
+  Adapted sources: packages/shared/src/browser-use/{command-metadata,commands,
+  backend,result,snapshot}.ts were adapted, with modifications, into
+  src/browser/{command-metadata,commands,backend,result,snapshot-schema}.ts.
+  Modifications keep the official interaction/browserList and
+  interaction/browserExecute wire schemas while consolidating the shared
+  package into this repository's module layout and making host-side request
+  parsing tolerant of advisory-field drift.
+
+  Adapted sources: apps/zcode-cli/packages/adapters/src/browser/{index,session,
+  page-command,playwright-command,snapshot,request,descriptor,executable}.ts
+  were adapted, with modifications, into src/browser/{runtime,session,
+  page-command,playwright-command,snapshot-capture,request,descriptor,
+  executable}.ts. Modifications replace @zcode/contracts imports with local
+  modules, bind the browser lifecycle to a Bridge task attempt, report
+  unverified teardowns honestly (connection-state verdicts, late-launch
+  recycling), and rewrite error text for Bridge runtime settings.
+
+  Adapted source: apps/zcode-cli/packages/contracts/src/interfaces/
+  browser-control.port.ts was adapted, with modifications, into
+  src/browser/contracts.ts. Modifications drop TraceContext and child-session
+  derivation: the Bridge host binds every request to the single active task
+  session and registers no child sessions.
+
+Each adapted file carries an attribution header and in-place annotations for
+Bridge-specific changes.
+
 --------------------------------------------------------------------------------
 
 cc-plugin-codex
@@ -46,3 +76,12 @@ license texts are included under plugins/codex-zcode-bridge/licenses/:
   content-type
     MIT License; bundled license comment credits Douglas Christopher Wilson.
     See CONTENT-TYPE-LICENSE.txt.
+  playwright-core 1.64.0
+    Apache-2.0. Bundled in source form inside worker/vendor/pkg/browser-host.cjs
+    with its browsers.json and package.json registry data at worker/vendor/;
+    see PLAYWRIGHT-CORE-LICENSE.txt and the package's ThirdPartyNotices.
+    The official playwright-core artifact prebuilds MIT-licensed
+    @modelcontextprotocol/sdk validation code with ajv and ajv-formats into
+    lib/utilsBundle.js. The Bridge's managed CDP path never uses that
+    embedded MCP/ajv content, and the vendored bundle currently carries it
+    untrimmed rather than modifying upstream's prebuilt file.

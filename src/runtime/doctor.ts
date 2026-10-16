@@ -108,6 +108,33 @@ export async function runBridgeDoctor(options: BridgeDoctorOptions = {}): Promis
         ? "A Bridge default model is configured; actual app-server availability is checked when a task starts"
         : "No Bridge model override; the ZCode account default will be used and cannot be confirmed without starting a session",
     });
+    // ADR-007 browser host: read-only status only. Doctor never launches a
+    // browser; headless resolution is confirmed on first browser use instead.
+    const browserUse = env["ZCODE_BRIDGE_BROWSER_USE"]?.trim() ?? "";
+    const browserExecutable = env["ZCODE_BRIDGE_BROWSER_EXECUTABLE"]?.trim() ?? "";
+    if (browserUse === "" || browserUse === "off") {
+      checks.push({
+        name: "browser_host",
+        status: "ok",
+        summary: browserUse === "off"
+          ? "Browser host is explicitly disabled; browser RPCs answer with an empty browser list"
+          : "Browser host is disabled by default; browser RPCs answer with an empty browser list",
+      });
+    } else if (browserUse === "headless") {
+      if (browserExecutable) {
+        if (!path.isAbsolute(browserExecutable)) {
+          checks.push({ name: "browser_host", status: "error", summary: `ZCODE_BRIDGE_BROWSER_EXECUTABLE must be an absolute path: ${browserExecutable}` });
+        } else if (existsSync(browserExecutable)) {
+          checks.push({ name: "browser_host", status: "ok", summary: `Headless browser host is enabled with the configured executable (${path.basename(browserExecutable)})` });
+        } else {
+          checks.push({ name: "browser_host", status: "error", summary: `Configured browser executable does not exist: ${browserExecutable}` });
+        }
+      } else {
+        checks.push({ name: "browser_host", status: "unknown", summary: "Headless browser host is enabled; the managed runtime resolves an installed Chromium/Edge at first use and is not probed here" });
+      }
+    } else {
+      checks.push({ name: "browser_host", status: "warning", summary: `ZCODE_BRIDGE_BROWSER_USE must be "off" or "headless"; got "${browserUse}" — the browser host stays disabled` });
+    }
     const dataRoot = options.dataRoot ?? env["ZCODE_BRIDGE_DATA_DIR"]?.trim() ?? null;
     if (dataRoot && existsSync(dataRoot)) {
       try {

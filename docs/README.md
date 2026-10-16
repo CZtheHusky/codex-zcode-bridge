@@ -128,3 +128,7 @@ English readers start at [README.md](../README.md). This index is bilingual; the
 | `<repo>\.tasks\notes\` | 会话期笔记；属于桥接运行数据根，不是版本化文档 |
 
 桥接运行数据根 `.tasks/` 只放任务记录，不要在那里存放研究用的外部仓库克隆。
+
+## 浏览器与传输修复审查分支
+
+[公开审查说明](reports/2026-10-15-browser-and-transport-fixes.md)汇总修改、来源、历史实测与当前分支验证；决策为[ADR-007](decisions/ADR-007-browser-host-rpc.md)和[ADR-008](decisions/ADR-008-session-frames-and-large-interactions.md)。私人任务状态索引、日志和快照不进入本分支。

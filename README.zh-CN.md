@@ -41,6 +41,7 @@ codex plugin add codex-zcode-bridge@codex-zcode-bridge
 - `ZCODE_BRIDGE_DEFAULT_PROVIDER_ID` 与 `ZCODE_BRIDGE_DEFAULT_MODEL_ID`：默认 provider 和 model ID，必须成对填写。
 - `ZCODE_BRIDGE_MODE`：初始执行模式，可设为 `plan`、`build`、`edit` 或 `yolo`，默认 `yolo`。`yolo` 会放行普通工具操作并使用当前操作系统账户权限；如需 ZCode 的审批规则，可设为 `build`。
 - `ZCODE_BRIDGE_MAX_CONCURRENT_WORKERS`：同一数据目录内的调度并行上限，范围 1–8，默认 8；多个 Bridge 进程应使用一致设置，重叠执行路径串行。
+- `ZCODE_BRIDGE_BROWSER_USE`：可选 headless 浏览器宿主，默认 `off`；设为 `headless` 后 worker 以 managed CDP 后端响应 ZCode 原生浏览器工具的 `interaction/browserList`/`interaction/browserExecute` 反向 RPC，使用独立临时 profile 启动已安装的系统 Chromium/Edge（不下载浏览器，也不连接用户已有窗口）。可选 `ZCODE_BRIDGE_BROWSER_EXECUTABLE` 指定绝对路径。该宿主上的原生浏览器模型链路已在记录的 Windows/ZCode 版本上验证，范围与限制见 `docs/reports/2026-10-15-browser-and-transport-fixes.md`。
 - `ZCODE_BRIDGE_TIMEOUT_MS`：未在任务中指定 `timeout_ms` 时使用的单次执行时限，单位毫秒，范围 60,000–14,400,000；默认 3,600,000（60 分钟）。
 
 `zcode_task` 调用超时或回执丢失时，使用原 `task_id` 查询或重试；相同内容会重放原回执，不同内容会被拒绝。可重试的 `zcode_continue` 调用应传入稳定的 `operation_id`，避免回执丢失后重复增加 attempt。
@@ -59,7 +60,7 @@ ZCode session 标题根据首条任务 prompt 生成。Bridge 会将 `TASK ID` �
 
 ZCode Desktop 的 Workspace 视图按 Codex 项目目录查找任务。
 
-遇到安装或启动问题时，调用 MCP 工具 `zcode_doctor` 获取只读诊断。它不会启动 ZCode 会话；模型能否被 app-server 选中以及真实权限审批往返仍需由实际任务验证。
+遇到安装或启动问题时，调用 MCP 工具 `zcode_doctor` 获取只读诊断。它不会启动 ZCode 会话，也不做真实权限审批；审批链路只能由实际任务验证（记录版本上已完成单次 43,014-byte Write 的真实审批往返实测）。
 
 ## 已知问题
 
@@ -70,12 +71,12 @@ ZCode Desktop 的 Workspace 视图按 Codex 项目目录查找任务。
 
 ## 安全与限制
 
-- 默认执行模式为 `yolo`。它会放行普通工具操作，并以当前操作系统账户权限运行；worktree 不是沙箱。如需 ZCode 的审批规则，将配置文件中的 `ZCODE_BRIDGE_MODE` 设为 `build`。Bridge 的权限请求转发已有协议测试，但真实 ZCode 权限审批往返尚未验证。
+- 默认执行模式为 `yolo`。它会放行普通工具操作，并以当前操作系统账户权限运行；worktree 不是沙箱。如需 ZCode 的审批规则，将配置文件中的 `ZCODE_BRIDGE_MODE` 设为 `build`。真实权限审批往返已在记录的 Windows/ZCode 版本实测（单次 43,014-byte Write 走完整持久化与回复链路，文件字节/SHA256 与批准内容一致）；其他审批组合未据此认证。审批记录的完整性哈希用于发现损坏与意外改动，不是对同 OS 账户恶意篡改的安全隔离。
 - Git worktree 只隔离工作目录，不是操作系统沙箱；`allowed_paths` 和 `forbidden_paths` 是任务约束说明，不能阻止进程访问其他文件或执行命令。
 - 是否创建 worktree 由 Codex 根据任务决定；Bridge 使用传入的项目目录和可选 worktree 路径，不替用户创建或删除 worktree。
 - 并行任务会增加本机资源占用和 provider 并发使用。
 - Bridge 将 prompt、状态、日志、可见模型输出、事件和结果保存在本机 `~/.codex/codex-zcode-bridge/`（Windows 为 `%USERPROFILE%\.codex\codex-zcode-bridge\`）；等待审批时还会保存必要的工具输入。请勿在任务或工作区中放入不应发送给所选模型服务或持久化到本机的数据。
-- Bridge 使用本机 ZCode app-server；交互请求是否出现及协议字段受已安装的 ZCode 版本影响。Bridge 会通过 `interaction_requested` 事件将权限或用户输入请求交给 Codex，再用 `zcode_interaction_reply` 回答。AskUserQuestion 的 `answers` 以每个问题的完整 `question` 文本为键、答案为值，不能用表头或选项标签作键；真实 ZCode 用户输入往返已验证，真实权限审批往返尚未验证。权限请求只应在用户明确授权后放行。
+- Bridge 使用本机 ZCode app-server；交互请求是否出现及协议字段受已安装的 ZCode 版本影响。Bridge 会通过 `interaction_requested` 事件将权限或用户输入请求交给 Codex，再用 `zcode_interaction_reply` 回答。超过单事件行上限的大请求以显式标记的预览发布，并附私有完整记录的 `full_request` 引用（路径、字节数、SHA256，按 `JSON.stringify(params)` 紧凑序列化计量）；预览不是全文，需要全文时读引用记录。AskUserQuestion 的 `answers` 以每个问题的完整 `question` 文本为键、答案为值，不能用表头或选项标签作键。权限请求只应在用户明确授权后放行。
 
 ## 源码构建
 

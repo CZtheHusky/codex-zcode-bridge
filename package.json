@@ -45,6 +45,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.1.0",
+    "playwright-core": "1.64.0",
     "zod": "^4.6.5"
   }
 }

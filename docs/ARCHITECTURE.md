@@ -1,8 +1,9 @@
 # 当前架构
 
 > Status: AUTHORITATIVE
-> Last updated: 2026-10-14
-> Last verified: 2026-10-14，核对用量额度耗尽错误路径；完整测试有 1 项 Windows 锁并发用例首次报 EPERM、单独复跑通过。其他条款沿用此前核验记录。
+> Last updated: 2026-10-15
+> Last verified: 2026-10-15，最新上游整合分支的验证结果见[审查说明](reports/2026-10-15-browser-and-transport-fixes.md)；旧版本实测与当前分支回归分别记录。
+> Verified against: 上游fae74e45033a50fb560c0014d1a6d60a7dc771d1 + 本分支修复；受测源码指纹见审查说明。
 
 本文件描述当前代码，不是历史阶段的冻结设计。公共类型见 `src/interfaces.ts`，MCP schema 见 `src/mcp/schemas.ts`；共享边界见 [SHARED_CORE.md](SHARED_CORE.md)。
 
@@ -48,11 +49,17 @@ worker 每 3 秒原子写入一次绑定 attempt 与 PID 的私有 heartbeat，�
 
 审批记录按 attempt 隔离，公开 request ID 也带 attempt。相同 ID 的方法与规范化参数（包括 session 和输入）必须一致，否则拒绝。超时、取消和结束均 abort 待处理 interaction，释放 worker 轮询。
 
+app-server stdout 协议帧与模型文本捕获分离（ADR-008）：完整 JSON-RPC 帧按换行逐条消费，单帧上限 **16 MiB 原始未 trim 的 UTF-8 字节**（空白填充不能经 trim 缩到限内），同 chunk 多帧之和不算单帧；帧顶层必须是 JSON 对象，null/数组/标量按非法帧处理。越限或非法帧是致命协议错误：首个原因被锁存，立即结束所有 pending RPC 与 turn 等待、停止缓冲，并阻止后续任何 request，使协议原因直接浮现而不是被 RPC 超时或任务时限掩盖。模型可见文本捕获保持独立的 2,000,000 字符边界并带显式截断标志。
+
+大审批输入（ADR-008）：sanitizer 允许的审批 params 完整私有保存至 **1 MiB UTF-8 bytes**（以 `JSON.stringify(params)` 紧凑序列化为计量单位），超过时给模型与调用宿主含 actual/limit 与拆分建议的可恢复拒绝，不执行对应工具。记录携带 params_bytes 与 params_sha256（均针对上述序列化单位，不是整个 JSON 记录文件）。批准（allow/accept）在 interaction 锁内校验记录完整一致后才落盘：只有完全无新元数据且不超过旧 32,000-byte 上限的记录按 legacy 兼容放行；大记录或缺/错类型元数据、字节/哈希不匹配、验证时超过 1 MiB 的记录一律拒绝，不记为已授权。worker 消费回答前另将持久化记录与最初收到的请求比对，等待中记录消失、损坏或被改动时明确 decline 并退出等待，不无限轮询。完整性哈希用于发现损坏与意外改动，不是对同 OS 账户恶意篡改的安全隔离。超过单事件 64,000-byte 上限的大请求发布为显式标记的预览事件（`preview: true`），并附带同任务/attempt 私有完整记录的引用（路径、字节数、SHA256），预览不得当作全文。
+
 生产执行使用 ZCodeAppServerAdapter。历史 CLI adapter、envelope、loader 和 GitWorktreeProvider 保留为 legacy 模块及其测试，不从共享公共入口导出，也不参与生产任务路径。不要把 legacy CLI 的重试、快照排除或 worktree 创建语义应用到当前生产路径。
 
 收到 ZCode `turn.failed` 时，adapter 只在 provider 错误的顶层 `code`、`type`、`message`（或纯文本错误）中寻找明确的用量额度耗尽标记。匹配后错误码为 `zcode_usage_exhausted`，事件与结果使用 Bridge 固定说明，明确本次执行已中断，要求 Codex 立即停止当前任务并告知用户；不得继续工作、自动重试或续作，须等待用户确认额度恢复。原始 RPC 错误不外发。HTTP 429、普通 rate limit、泛化 limit 错误和未识别内容仍为 `zcode_nonzero_exit`，不能推断额度耗尽。是否能分类取决于当前 ZCode runtime 实际提供的错误字段。
 
 模型目录客户端与执行客户端目前保留各自 RPC 生命周期：前者处理短 session/cache，后者处理 turn/event/interaction。未为了减少行数合并协议客户端；公共配置、环境、报告和进程管理仍共享。
+
+可选浏览器宿主（ADR-007，`src/browser/`）：默认关闭。开启后 worker 的 app-server adapter 在 `#handleMessage` 拦截 `interaction/browserList` / `interaction/browserExecute` 反向请求，校验 session/workspace/turnId 身份后交给按 attempt 惰性创建的 BrowserHost。Host 负责 protocol 参数校验（zod，改编自官方 browser-use schema）、默认关闭时空列表表达、重复 requestId、stale generation、host 级命令截止（backend 不响应 abort 也会超时）与幂等 cancelRequest；每次 discovery 都重新查询 backend 以免缓存掩盖重启后的 generation 变化。managed CDP runtime（官方 CLI adapter 改编，playwright-core 1.64.0 固定版本）用独立临时 profile 启动系统 Chromium/Edge，不下载浏览器、不连接用户窗口、不冒充桌面 IAB；descriptor 通过 apiSupportOverrides 隐藏未实现成员。浏览器生命周期属于当前 attempt：成功、失败、取消、超时路径都先有界关闭浏览器宿主，最终 outcome 的 cleanupVerified/cleanupError 合并 app-server 与浏览器两份清理事实，浏览器关闭未验证时不得报告 verified。runtime.close 以连接状态而非 promise settle 判定成败，late launch 在 close 后落地仍会被回收并把真实回收结果并入判定。普通事件只含生命周期与错误码，不含 URL、标题、页面内容、截图或 CDP endpoint。插件把 managed CDP 后端打成 `worker/vendor/pkg/browser-host.cjs`（CJS，附带 playwright-core 的 browsers.json/package.json 注册数据在 `worker/vendor/`），worker ESM bundle 通过 `src/browser/load-backend.ts` 按相对路径加载，不依赖开发目录或 Codex node_modules。
 
 TaskStore 的 JSON 用临时文件原子 rename；事件文件有独立短锁、字节上限、关键事件保留空间和稀疏索引。追加只读最后一个字节，不重新读取完整历史。worker 把模型输出拆为 2000 字符事件；容量用尽仍可能丢弃非关键事件，普通超长摘要明确标记截断。
 

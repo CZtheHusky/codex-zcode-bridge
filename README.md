@@ -57,6 +57,8 @@ Codex can delegate the task, monitor execution, inspect the resulting changes, v
 - Unified task observation (`zcode_status.observation`, `zcode_events.observation`): worker/runtime liveness with OS process-identity probing (PID-reuse safe), activity/waiting/stalled hints, result/cleanup state — advisory only, `unknown` never means dead.
 - Bounded, resumable event scans (`zcode_events` with `scan_cursor`/`max_bytes`): complete-line parsing, corruption counters, byte-budgeted reads near the log cap.
 - Per-attempt usage/model/timing evidence in `zcode_result` (`usage`, `model`, `timing`): runtime-reported token numbers only — missing stays "not reported", totals are never recomputed.
+- Large approval inputs (ADR-008): tool-permission params persist completely up to 1 MiB (measured on the compact `JSON.stringify(params)` serialization); requests over the 64,000-byte single-event line are published as an explicitly-marked preview with a private full-request reference (path, byte count, SHA256). Approvals verify the record's bytes/SHA256 under the interaction lock; a record that went missing, corrupt, or edited mid-wait is declined explicitly instead of executing.
+- Session frames (ADR-008): newline-delimited JSON-RPC frames are consumed one at a time with a 16 MiB raw-frame UTF-8 limit; a fatal frame error latches its reason, ends pending RPCs and the turn, and blocks further requests instead of surfacing as a timeout.
 - Optional project task ledger (`ledger_*` tools, opt-in only): long-lived project tasks, runs, per-AC reviews, and a controlled DONE gate that a worker report alone can never satisfy.
 
 ## Install
@@ -91,6 +93,7 @@ To customize settings, edit `%USERPROFILE%\.codex\codex-zcode-bridge\runtime-con
 - `ZCODE_BRIDGE_MODE`: initial execution mode: `plan`, `build`, `edit`, or `yolo`; defaults to `yolo`. `yolo` allows ordinary tool operations with the current operating-system account's permissions. Set it to `build` to use ZCode's approval rules.
 - `ZCODE_BRIDGE_TIMEOUT_MS`: default wall-clock limit for one task attempt when `timeout_ms` is omitted; 60,000–14,400,000 milliseconds, default 3,600,000 (60 minutes).
 - `ZCODE_BRIDGE_MAX_CONCURRENT_WORKERS`: parallel task limit.
+- `ZCODE_BRIDGE_BROWSER_USE`: optional headless browser host for ZCode's native browser tools; `off` (default) or `headless`. When `headless`, the Bridge worker answers `interaction/browserList`/`interaction/browserExecute` reverse RPCs through a managed CDP backend that launches an installed system Chromium/Edge with an isolated temporary profile (nothing is downloaded and the user's own browser windows are never attached). Optional `ZCODE_BRIDGE_BROWSER_EXECUTABLE` sets an absolute executable path. The native model browser flow was verified on the recorded Windows/ZCode version; see `docs/reports/2026-10-15-browser-and-transport-fixes.md` for scope and remaining limitations.
 
 Save valid JSON; a newly started Bridge reads the config file, which takes precedence over legacy environment variables. `ZCODE_HOME` must point to the `.zcode` directory, and the personal provider config must be at `v2/provider_config.json` inside it. Copy provider/model IDs from your ZCode configuration, and do not edit ZCode's provider files.
 
@@ -121,12 +124,12 @@ If a `zcode_task` call times out or loses its response, query or retry with the 
 
 ## Security and limitations
 
-- The default execution mode is `yolo`. It allows ordinary tool operations with the current operating-system account's permissions; a worktree is not a sandbox. Set `ZCODE_BRIDGE_MODE` to `build` to use ZCode's approval rules. The Bridge has protocol tests for permission forwarding, but a real ZCode permission-approval roundtrip has not been verified.
+- The default execution mode is `yolo`. It allows ordinary tool operations with the current operating-system account's permissions; a worktree is not a sandbox. Set `ZCODE_BRIDGE_MODE` to `build` to use ZCode's approval rules. A real permission-approval roundtrip has been verified on the recorded Windows/ZCode version (a single 43,014-byte Write approved through the full persistence and reply path with byte/SHA256-verified content); other approval combinations were not certified. Integrity hashes on approval records detect corruption and accidental edits; they are not a security isolation against a malicious same-OS-account process.
 - A Git worktree isolates the working directory; it is not an operating-system sandbox. `allowed_paths` and `forbidden_paths` describe task constraints but cannot prevent the process from accessing other files or running commands.
 - Codex decides whether to create a worktree. The Bridge uses the supplied project directory and optional worktree path; it does not create or remove worktrees.
 - Parallel tasks use more local resources and provider capacity.
 - The Bridge stores prompts, status, logs, visible model output, events, and results locally in `~/.codex/codex-zcode-bridge/` (on Windows: `%USERPROFILE%\.codex\codex-zcode-bridge\`). Do not include credentials or data in tasks or workspaces if they should not be sent to the selected model service.
-- The Bridge uses the local ZCode app-server. Interactions and available events depend on the installed ZCode version. For AskUserQuestion replies, key `answers` by each full `questions[].question` text and use the selected or explicit answer as its value; do not use the header or option label as the key. A real ZCode user-input roundtrip has been verified; a real permission-approval roundtrip has not. Only allow permission requests when the user explicitly authorizes the action.
+- The Bridge uses the local ZCode app-server. Interactions and available events depend on the installed ZCode version. For AskUserQuestion replies, key `answers` by each full `questions[].question` text and use the selected or explicit answer as its value; do not use the header or option label as the key. Large permission requests arrive as an explicitly-marked preview event with a `full_request` reference (the preview is not the full input; the reference carries byte count and SHA256 over the compact serialized params). Only allow permission requests when the user explicitly authorizes the action.
 
 ## Build from source
 
