@@ -4,6 +4,15 @@
 
 当前版本以 `package.json` 和 Release Please manifest 为准。提交推送到 `master` 后，Release Please 会在有待发布变更时创建发布 PR，并同步更新版本文件与本日志；合并发布 PR 后会生成对应 Git tag 和 GitHub Release。
 
+## [1.2.5](https://github.com/Sandyzzx/codex-zcode-bridge/compare/codex-zcode-bridge-v1.2.4...codex-zcode-bridge-v1.2.5) (2026-10-16)
+
+
+### Bug Fixes
+
+* add optional headless browser host and handle large session payloads ([020c8a9](https://github.com/Sandyzzx/codex-zcode-bridge/commit/020c8a918d47bb5c6f94a2fa1b0a8049aae5c80c))
+* stabilize browser timeout fixtures on Node 22 ([34f26e8](https://github.com/Sandyzzx/codex-zcode-bridge/commit/34f26e893fcfffebdbf3f36e36912723e5a71656))
+* support headless browser hosting and large session interactions ([66e81b1](https://github.com/Sandyzzx/codex-zcode-bridge/commit/66e81b18577edc36c876faa03908ee4471ca6a89))
+
 ## [1.2.4](https://github.com/Sandyzzx/codex-zcode-bridge/compare/codex-zcode-bridge-v1.2.3...codex-zcode-bridge-v1.2.4) (2026-10-14)
 
 
