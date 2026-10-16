@@ -4,6 +4,14 @@
 
 当前版本以 `package.json` 和 Release Please manifest 为准。提交推送到 `master` 后，Release Please 会在有待发布变更时创建发布 PR，并同步更新版本文件与本日志；合并发布 PR 后会生成对应 Git tag 和 GitHub Release。
 
+## [1.2.6](https://github.com/Sandyzzx/codex-zcode-bridge/compare/codex-zcode-bridge-v1.2.5...codex-zcode-bridge-v1.2.6) (2026-10-16)
+
+
+### Bug Fixes
+
+* preserve browser environment and validate short repository roots ([f3576a2](https://github.com/Sandyzzx/codex-zcode-bridge/commit/f3576a266adb02f2c7e30428f304ccd34f29ea5f))
+* preserve browser environment and validate short repository roots ([2bf434d](https://github.com/Sandyzzx/codex-zcode-bridge/commit/2bf434dc09ca8e4ab7e5df9195850647cc53882c))
+
 ## [1.2.5](https://github.com/Sandyzzx/codex-zcode-bridge/compare/codex-zcode-bridge-v1.2.4...codex-zcode-bridge-v1.2.5) (2026-10-16)
 
 
