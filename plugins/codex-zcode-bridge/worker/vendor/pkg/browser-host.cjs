@@ -163225,8 +163225,15 @@ var MAC_BROWSER_PATHS = [
   "/Applications/Chromium.app/Contents/MacOS/Chromium",
   "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
 ];
+function windowsEnvValue(env, key) {
+  const wanted = key.toUpperCase();
+  for (const [name, value2] of Object.entries(env)) {
+    if (name.toUpperCase() === wanted && value2 !== void 0 && value2 !== "") return value2;
+  }
+  return void 0;
+}
 function windowsBrowserPaths(env) {
-  return [env.PROGRAMFILES, env["PROGRAMFILES(X86)"], env.LOCALAPPDATA].filter((root) => Boolean(root?.trim())).flatMap((root) => [
+  return [windowsEnvValue(env, "PROGRAMFILES"), windowsEnvValue(env, "PROGRAMFILES(X86)"), windowsEnvValue(env, "LOCALAPPDATA")].filter((root) => Boolean(root?.trim())).flatMap((root) => [
     (0, import_node_path.join)(root, "Google", "Chrome", "Application", "chrome.exe"),
     (0, import_node_path.join)(root, "Chromium", "Application", "chrome.exe"),
     (0, import_node_path.join)(root, "Microsoft", "Edge", "Application", "msedge.exe")
