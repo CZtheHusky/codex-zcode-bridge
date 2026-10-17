@@ -10,7 +10,7 @@ import { BridgeError } from "./errors.js";
 import { loadPersistedRuntimeEnvironment, NodeRuntimeResolver } from "./resolver.js";
 import { ZCODE_SESSION_MODES, type ZCodeSessionMode } from "./session-preferences.js";
 import type { ZCodeRuntimeConfig } from "../interfaces.js";
-import { terminateProcessTree } from "../adapters/process-spawn.js";
+import { captureSpawnGenerationIdentity, childStillOnSpawnGeneration, createPlatformProbe, terminateProcessTree } from "../adapters/process-spawn.js";
 import { codexHostProfile, validateHostProfile, type BridgeHostProfile } from "../host/profile.js";
 import { withProcessLock } from "../store/process-lock.js";
 import { atomicRename } from "../store/atomic-rename.js";
@@ -322,6 +322,28 @@ function startAppServer(config: ZCodeRuntimeConfig, cwd: string, env: NodeJS.Pro
   let stderr = "";
   let nextId = 0;
   let closed = false;
+  // ADR-009 spawn-generation continuity: libuv releases the child's native
+  // handle when it delivers 'exit' (before stdio close), so continuity is
+  // tracked from the exit state, never from a close flag. The identity
+  // capture re-verifies the generation after every await and discards
+  // results that raced an exit (a recycled PID's fingerprint must never be
+  // stored as this spawn's identity).
+  let childExitSeen = false;
+  child.once("exit", () => {
+    childExitSeen = true;
+  });
+  const generationChild = {
+    get pid() { return child.pid; },
+    get exitCode() { return child.exitCode; },
+    get signalCode() { return child.signalCode; },
+    get exitSeen() { return childExitSeen; },
+  };
+  let childIdentity: { pid: number; fingerprint: string } | null = null;
+  if (process.platform === "win32" && child.pid) {
+    void captureSpawnGenerationIdentity(generationChild, createPlatformProbe()).then((identity) => {
+      childIdentity = identity;
+    });
+  }
   child.stdout.setEncoding("utf8");
   child.stderr.setEncoding("utf8");
   const write = (message: JsonRecord): void => { child.stdin.write(`${JSON.stringify(message)}\n`); };
@@ -394,7 +416,17 @@ function startAppServer(config: ZCodeRuntimeConfig, cwd: string, env: NodeJS.Pro
         child.once("close", () => { clearTimeout(timer); resolve(); });
       });
     }
-    if (child.pid && (!closed || process.platform !== "win32")) await terminateProcessTree(child.pid);
+    if (child.pid && (!closed || process.platform !== "win32")) {
+      // Windows: only signal while the child is provably on its original
+      // spawn generation; after exit the PID may be recycled and a missing
+      // captured identity is a conservative refusal, never bare-PID trust.
+      if (process.platform === "win32" && !childStillOnSpawnGeneration(generationChild)) return;
+      await terminateProcessTree(child.pid, {
+        graceMs: 500,
+        killWaitMs: 5_000,
+        expectedRootFingerprint: childIdentity?.pid === child.pid ? childIdentity.fingerprint : null,
+      });
+    }
   };
   return { child, request, close, get stderr() { return stderr; } };
 }

@@ -20,7 +20,8 @@ import type { ZCodeRunOutcome } from "./zcode-adapter.js";
 import { buildContinuePrompt, buildTaskPrompt } from "../prompts/task-prompt.js";
 import { BridgeError } from "../runtime/errors.js";
 import { loadPersistedRuntimeEnvironment, NodeRuntimeResolver } from "../runtime/resolver.js";
-import { isProcessRunning, terminateProcessTree } from "./process-spawn.js";
+import { captureSpawnGenerationIdentity, childStillOnSpawnGeneration, isProcessRunning, terminateProcessTree } from "./process-spawn.js";
+import { createPlatformProbe, type ProcessProbe } from "../runtime/process-probe.js";
 import { createMinimalOsEnv } from "../runtime/child-env.js";
 import { catalogProviderId, buildAccountProviderPayload, runtimeAuthReply, zcodeDataBaseDir, zcodeTasksIndexPath } from "../runtime/account-provider.js";
 import { resolveSessionPreferences } from "../runtime/session-preferences.js";
@@ -81,6 +82,12 @@ interface AppServerClient {
 interface RunEntry {
   handle: AgentHandle;
   child: ChildProcessWithoutNullStreams | null;
+  /** ADR-009: spawn-generation identity of `child`, captured while the
+   * libuv-held native handle keeps the PID unrecyclable (before 'exit'). */
+  childIdentity: { pid: number; fingerprint: string } | null;
+  /** True once the child's 'exit' fired (native handle released; the PID may
+   * be recycled from that point and must never be signalled again). */
+  childExitSeen: boolean;
   client: AppServerClient | null;
   sessionId: string | null;
   finished: boolean;
@@ -171,6 +178,9 @@ export interface ZCodeAppServerAdapterOptions {
   turnBindingCompatMs?: number;
   /** Idle time before a replay poll (default 10_000); tests lower it. */
   replayIdleMs?: number;
+  /** Platform probe used for the spawn-generation identity capture (ADR-009);
+   * defaults to the real platform probe. */
+  probe?: ProcessProbe;
 }
 
 const RPC_TIMEOUT_MS = 30_000;
@@ -201,6 +211,7 @@ export class ZCodeAppServerAdapter implements CodingAgentAdapter {
   readonly #turnBindingCompatMs: number;
   readonly #replayIdleMs: number;
   readonly #browser: AdapterBrowserOptions | undefined;
+  readonly #probe: ProcessProbe;
   readonly #runs = new Map<AgentHandle, RunEntry>();
   readonly #workspaceByTask = new Map<string, string>();
 
@@ -212,6 +223,7 @@ export class ZCodeAppServerAdapter implements CodingAgentAdapter {
     this.#homeDir = options.homeDir ?? homedir();
     this.#host = validateHostProfile(options.host ?? codexHostProfile(this.#homeDir));
     this.#now = options.now ?? (() => new Date());
+    this.#probe = options.probe ?? createPlatformProbe();
     this.#resolveInteraction = options.resolveInteraction;
     this.#onOutcomeCheckpoint = options.onOutcomeCheckpoint;
     this.#onInteractionState = options.onInteractionState;
@@ -308,6 +320,8 @@ export class ZCodeAppServerAdapter implements CodingAgentAdapter {
     const entry: RunEntry = {
       handle,
       child: null,
+      childIdentity: null,
+      childExitSeen: false,
       client: null,
       sessionId: resumeSessionId,
       finished: false,
@@ -835,7 +849,7 @@ export class ZCodeAppServerAdapter implements CodingAgentAdapter {
       await this.#closeBrowserHost(entry);
       try {
         if (entry.client) await entry.client.close();
-        else if (entry.child?.pid) await terminateProcessTree(entry.child.pid);
+        else if (entry.child?.pid) await this.#terminateOwnedChild(entry);
       } catch (cleanupError) {
         const browserSuffix = entry.browserCleanupError ? ` Managed browser cleanup is also unverified: ${entry.browserCleanupError}` : "";
         throw new BridgeError("cleanup_failed", `ZCode process termination could not be verified; workspace remains occupied.${browserSuffix}`, { cause: cleanupError });
@@ -881,6 +895,25 @@ export class ZCodeAppServerAdapter implements CodingAgentAdapter {
     let stdoutBuffer = "";
     let rpcId = 0;
     let closed = false;
+    // ADR-009 spawn-generation binding: libuv releases the child's native
+    // handle when it delivers 'exit' (before stdio close), so continuity is
+    // tracked from the exit state. The shared capture re-verifies the
+    // generation after every await and discards fingerprints that raced an
+    // exit — a recycled PID's identity is never stored as this spawn's.
+    child.once("exit", () => {
+      entry.childExitSeen = true;
+    });
+    const generationChild = {
+      get pid() { return child.pid; },
+      get exitCode() { return child.exitCode; },
+      get signalCode() { return child.signalCode; },
+      get exitSeen() { return entry.childExitSeen; },
+    };
+    if (process.platform === "win32" && child.pid) {
+      void captureSpawnGenerationIdentity(generationChild, this.#probe).then((identity) => {
+        entry.childIdentity = identity;
+      });
+    }
     const pending = new Map<string | number, PendingRpc>();
     // ADR-008: a fatal wire-format failure ends every pending RPC and the turn
     // wait immediately, stops buffering, and reports stable reason + safe size
@@ -1033,15 +1066,38 @@ export class ZCodeAppServerAdapter implements CodingAgentAdapter {
         child.once("close", () => { clearTimeout(timer); resolve(); });
       });
       // The close event is authoritative for this direct child. If it races
-      // the grace timer, check the PID before taskkill to avoid turning an
-      // already-exited app-server into a cleanup failure on Windows.
+      // the grace timer, check the PID before terminating to avoid turning an
+      // already-exited app-server into a cleanup failure on Windows. The
+      // Windows path additionally requires the spawn-captured identity
+      // (ADR-009): after 'exit' the PID may be recycled and is never
+      // signalled; without a captured identity it refuses (cleanup_failed).
       if (closed) {
         if (process.platform !== "win32" && child.pid) await terminateProcessTree(child.pid);
         return;
       }
-      if (child.pid && isProcessRunning(child.pid)) await terminateProcessTree(child.pid);
+      if (child.pid && isProcessRunning(child.pid)) {
+        if (entry.childExitSeen) return;
+        await terminateProcessTree(child.pid, {
+          graceMs: 500,
+          killWaitMs: 5_000,
+          expectedRootFingerprint: entry.childIdentity?.pid === child.pid ? entry.childIdentity.fingerprint : null,
+        });
+      }
     };
     return { child, request, replayEvents, close, get stderr() { return stderr; } };
+  }
+
+  /** ADR-009: terminate the adapter's own spawned child with the identity
+   * captured while its native handle was still held. Windows refuses to
+   * signal without it (a bare current PID is never trusted), and a child
+   * whose 'exit' already fired is never signalled again. POSIX keeps its
+   * existing process-group behaviour. */
+  async #terminateOwnedChild(entry: RunEntry): Promise<void> {
+    const pid = entry.child?.pid;
+    if (!pid) return;
+    if (entry.childExitSeen) return;
+    const fingerprint = entry.childIdentity?.pid === pid ? entry.childIdentity.fingerprint : null;
+    await terminateProcessTree(pid, { graceMs: 500, killWaitMs: 5_000, expectedRootFingerprint: fingerprint });
   }
 
   #handleMessage(

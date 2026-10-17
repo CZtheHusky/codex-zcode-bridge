@@ -31,7 +31,7 @@ import { buildTaskResult, type TaskFailure } from "./normalize.js";
 import type { ZCodeRunOutcome } from "../adapters/zcode-adapter.js";
 import { TaskManagerError } from "./errors.js";
 import { defaultSpawnWorker, type SpawnWorker } from "./spawn-worker.js";
-import { isProcessRunning, terminateProcessTree, type TerminateProcessTree } from "../adapters/process-spawn.js";
+import { isProcessRunning, terminateProcessTree, verifyProcessTreeClaimantsClean, type TerminateProcessTree, type TreeClaimantTarget } from "../adapters/process-spawn.js";
 import { validateTaskTimeout } from "../runtime/task-timeout.js";
 import { tryAcquireProcessLock, withProcessLock, publishSelfIdentity } from "../store/process-lock.js";
 import { buildTaskPrompt, buildContinuePrompt } from "../prompts/task-prompt.js";
@@ -51,6 +51,8 @@ export interface TaskManagerOptions {
   isProcessRunning?: (pid: number) => boolean;
   /** Defaults to real process-tree termination with verification. */
   terminateProcessTree?: TerminateProcessTree;
+  /** Defaults to the read-only recorded-tree claimant scan (ADR-009). */
+  verifyTreeClean?: (targets: readonly TreeClaimantTarget[]) => Promise<{ clean: boolean; livePids: readonly number[] }>;
   /** Defaults to the platform ProcessProbe (Windows PowerShell batch / Linux
    * /proc / macOS ps). Recovery and cleanup identity checks use it. */
   probe?: ProcessProbe;
@@ -77,6 +79,7 @@ export class BridgeTaskManager implements ProgressTaskManager {
   readonly #spawnWorker: SpawnWorker;
   readonly #isProcessRunning: (pid: number) => boolean;
   readonly #terminateProcessTree: TerminateProcessTree;
+  readonly #verifyTreeClean: (targets: readonly TreeClaimantTarget[]) => Promise<{ clean: boolean; livePids: readonly number[] }>;
   readonly #probe: ProcessProbe | null;
   readonly #now: () => Date;
   readonly #dataRoot: string;
@@ -96,6 +99,7 @@ export class BridgeTaskManager implements ProgressTaskManager {
     this.#spawnWorker = options.spawnWorker ?? defaultSpawnWorker;
     this.#isProcessRunning = options.isProcessRunning ?? isProcessRunning;
     this.#terminateProcessTree = options.terminateProcessTree ?? terminateProcessTree;
+    this.#verifyTreeClean = options.verifyTreeClean ?? verifyProcessTreeClaimantsClean;
     this.#probe = options.probe ?? null;
     this.#now = options.now ?? (() => new Date());
     this.#dataRoot = options.store.dataRoot;
@@ -231,6 +235,21 @@ export class BridgeTaskManager implements ProgressTaskManager {
       return;
     }
 
+    // ADR-009 / review-round-1 R1: executor-exit evidence never clears a
+    // latched descendant-cleanup failure. When the failure record carries
+    // known member pids (or is corrupt), only a cancel's claimant-scan-gated
+    // release may clear the latch; the probe path stays occupied.
+    const failureRecordState = this.#cleanupFailureRecordState(taskId, status.attempt);
+    if (failureRecordState !== "none") {
+      const occurrence = this.#counters.record("terminal_cleanup_latched", failureRecordState);
+      if (this.#counters.shouldEmit("terminal_cleanup_latched", failureRecordState)) {
+        this.#store.appendEvent(taskId, "cleanup_unverified", "A recorded tree-cleanup failure with known members keeps the terminal task occupied; cancel runs the recorded-tree scan", {
+          record_state: failureRecordState, count: occurrence.count,
+        }, this.#now().toISOString());
+      }
+      return;
+    }
+
     await this.#exclusive(async () => {
       const current = this.#safeStatus(taskId);
       if (!current || !isTerminalStatus(current.status) || current.cleanup_unverified !== true) return;
@@ -349,6 +368,170 @@ export class BridgeTaskManager implements ProgressTaskManager {
     }
   }
 
+  /** Latches a failed termination (ADR-009): occupancy is retained via
+   * cleanup_unverified and the member pids observed by the failed
+   * transaction are persisted so later claimant scans cover them. The
+   * complete member set is persisted structurally (cleanup-failure.json);
+   * the bounded [cleanup-members: …] marker in the status text is a durable
+   * fallback that is only trusted when complete — a truncated marker (or a
+   * missing/corrupt record) fails later releases closed instead of silently
+   * narrowing the scan (review-round-1 R3 + addendum). */
+  #recordCleanupFailure(taskId: string, attempt: number, error: unknown): void {
+    const message = boundedErrorMessage(error, 300);
+    const freshPids = Array.isArray((error as { memberPids?: number[] }).memberPids)
+      ? ((error as { memberPids: number[] }).memberPids).filter((pid) => Number.isSafeInteger(pid) && pid > 0)
+      : [];
+    // Recover the previous set MONOTONICALLY (review-round-1 addendum
+    // 13:16 + 13:39): the prior latch marker is ALWAYS parsed and merged —
+    // even when the structural record reads back successfully — and its
+    // incomplete state (or the record's persisted complete:false flag)
+    // sticks forever: no later failure may wash a partial set back to
+    // completeness.
+    let metaPids: number[] = [];
+    let metaKnownIncomplete = false;
+    try {
+      const previous = this.#store.readAttemptMeta<{ member_pids?: unknown; complete?: unknown }>(taskId, attempt, "cleanup-failure.json");
+      if (previous !== null) {
+        metaPids = this.#validMemberPids(previous.member_pids);
+        metaKnownIncomplete = previous.complete === false;
+      }
+    } catch {
+      // Corrupt/unreadable record: fall through to the marker below.
+    }
+    const priorMarker = this.#parseCleanupMembersMarker(this.#safeStatus(taskId)?.error);
+    const priorMarkerIncomplete = priorMarker !== null && !priorMarker.complete;
+    const previousPids = [...new Set([...metaPids, ...(priorMarker?.pids ?? [])])];
+    const mergedPids = [...new Set([...previousPids, ...freshPids])];
+    const joined = mergedPids.join(",");
+    const fitsWithoutTruncation = joined.length <= 1_600 && !(metaKnownIncomplete || priorMarkerIncomplete);
+    const memberMarker = mergedPids.length > 0
+      ? (fitsWithoutTruncation ? ` [cleanup-members: ${joined}]` : ` [cleanup-members: ${mergedPids.slice(0, 200).join(",")},…]`)
+      : (metaKnownIncomplete || priorMarkerIncomplete ? " [cleanup-members: ,…]" : "");
+    const recordComplete = fitsWithoutTruncation;
+    try {
+      this.#store.writeAttemptMeta(taskId, attempt, "cleanup-failure.json", {
+        member_pids: mergedPids,
+        complete: recordComplete,
+        last_error: message,
+      });
+    } catch {
+      // The status marker below keeps the member set durable even without
+      // the meta record; an over-long or already-incomplete set keeps its
+      // truncation marker and later releases fail closed rather than scan
+      // a partial set.
+    }
+    try {
+      this.#store.writeStatus(taskId, {
+        cleanup_unverified: true,
+        error: `cancellation could not be verified: ${boundedErrorMessage(error, 200)}${memberMarker}`,
+      });
+      this.#store.appendEvent(taskId, "cancel_failed", message, mergedPids.length > 0 ? { member_pids: mergedPids } : undefined, this.#now().toISOString());
+    } catch {
+      // Status writes under the lock should not throw here; if they do the
+      // CANCEL_FAILED propagation still surfaces the failure.
+    }
+  }
+
+  /** Validates a persisted member_pids value (review-round-1 addendum R3): a
+   * PRESENT record without the member_pids field, a null, or a non-array is
+   * corrupt and fails closed — "missing" must never read as "no members". */
+  #validMemberPids(value: unknown): number[] {
+    if (value === undefined || value === null) {
+      throw new TaskManagerError("CANCEL_FAILED", "cleanup failure record is corrupt: member pid list is missing");
+    }
+    if (!Array.isArray(value) || !value.every((pid) => Number.isSafeInteger(pid) && (pid as number) > 0)) {
+      throw new TaskManagerError("CANCEL_FAILED", "cleanup failure record is corrupt: member pid list is not a valid array of positive integers");
+    }
+    return value as number[];
+  }
+
+  /** Parses the durable [cleanup-members: …] marker from a latched status
+   * error text. A TRUNCATED marker (…) is reported as incomplete: it must
+   * never be treated as the full member set (addendum R3 case 2). */
+  #parseCleanupMembersMarker(errorText: string | null | undefined): { pids: number[]; complete: boolean } | null {
+    const marker = /\[cleanup-members: ([0-9,]+)(,…)?\]/u.exec(errorText ?? "");
+    if (!marker) return null;
+    const pids = marker[1]!.split(",").map((part) => Number(part)).filter((pid) => Number.isSafeInteger(pid) && pid > 0);
+    return { pids, complete: marker[2] === undefined };
+  }
+
+  /** Classification of the persisted cleanup-failure state for an attempt:
+   * "none" (no record and no known-member marker — legacy latch), "empty"
+   * (explicitly member-less record), "members" (known member pids must stay
+   * covered, including via a complete latch marker), or "corrupt" (fail
+   * closed). A read error is treated as corrupt. */
+  #cleanupFailureRecordState(taskId: string, attempt: number): "none" | "empty" | "members" | "corrupt" {
+    let meta: { member_pids?: unknown; complete?: unknown } | null = null;
+    try {
+      meta = this.#store.readAttemptMeta<{ member_pids?: unknown; complete?: unknown }>(taskId, attempt, "cleanup-failure.json") ?? null;
+    } catch {
+      return "corrupt";
+    }
+    const marker = this.#parseCleanupMembersMarker(this.#safeStatus(taskId)?.error);
+    if (meta === null) {
+      // No structural record: a latch marker proves known members existed
+      // (terminal recovery must not treat this as legacy).
+      if (marker === null) return "none";
+      return marker.complete ? "members" : "corrupt";
+    }
+    let memberPids: number[];
+    try {
+      memberPids = this.#validMemberPids(meta.member_pids);
+    } catch {
+      return "corrupt";
+    }
+    // A record that declares itself partial (complete:false, written when the
+    // full set exceeded the durable marker) can never bound a release.
+    if (meta.complete === false) return "corrupt";
+    return memberPids.length > 0 ? "members" : "empty";
+  }
+
+  /** Recorded pids (with persisted fingerprints when available) that later
+   * claimant scans must cover after a termination failure. The durable
+   * [cleanup-members: …] marker inside the latched status text is ALWAYS
+   * unioned in (R3): a missing or emptied failure record can never narrow
+   * the scan below what the latch itself recorded; a corrupt record — or a
+   * TRUNCATED marker that cannot restore the full set — fails closed before
+   * any scan runs. */
+  #claimantTargets(
+    taskId: string,
+    attempt: number,
+    probeSnapshot: { worker_pid: number | null; zcode_pid: number | null; identity: { worker?: ProcessIdentityLike; runtime?: ProcessIdentityLike | null } | null },
+  ): TreeClaimantTarget[] {
+    const targets: TreeClaimantTarget[] = [];
+    const addPid = (pid: number, fingerprint: string | null): void => {
+      if (Number.isSafeInteger(pid) && pid > 0 && !targets.some((t) => t.pid === pid)) targets.push({ pid, fingerprint });
+    };
+    const workerFingerprint = typeof probeSnapshot.identity?.worker?.fingerprint === "string" ? probeSnapshot.identity.worker.fingerprint : null;
+    const runtimeFingerprint = typeof probeSnapshot.identity?.runtime?.fingerprint === "string" ? probeSnapshot.identity.runtime.fingerprint : null;
+    if (probeSnapshot.worker_pid !== null) addPid(probeSnapshot.worker_pid, workerFingerprint);
+    if (probeSnapshot.zcode_pid !== null) addPid(probeSnapshot.zcode_pid, runtimeFingerprint);
+    // Durable fallback first: the latch text was written together with the
+    // failure; only a COMPLETE marker may restore the member set.
+    const marker = this.#parseCleanupMembersMarker(this.#safeStatus(taskId)?.error);
+    if (marker !== null && !marker.complete) {
+      throw new TaskManagerError("CANCEL_FAILED", "cleanup member record is incomplete: the latched member list was truncated and cannot be reconstructed; the task stays occupied");
+    }
+    if (marker !== null) {
+      for (const pid of marker.pids) addPid(pid, null);
+    }
+    let meta: { member_pids?: unknown; complete?: unknown } | null = null;
+    try {
+      meta = this.#store.readAttemptMeta<{ member_pids?: unknown; complete?: unknown }>(taskId, attempt, "cleanup-failure.json") ?? null;
+    } catch {
+      // Read failure: the marker above still covers the recorded members;
+      // falling back to root-only would narrow coverage and is not done.
+    }
+    if (meta === null) return targets;
+    // A record that declares itself partial can never bound a release.
+    if (meta.complete === false) {
+      throw new TaskManagerError("CANCEL_FAILED", "cleanup member record is incomplete: the structured member list is marked partial; the task stays occupied");
+    }
+    // A present-but-corrupt record must fail the release, not narrow it.
+    for (const pid of this.#validMemberPids(meta.member_pids)) addPid(pid, null);
+    return targets;
+  }
+
   /** Applies confirmed probe verdicts to one unchanged attempt snapshot. */
   #applyReconcileVerdicts(
     taskId: string,
@@ -356,6 +539,20 @@ export class BridgeTaskManager implements ProgressTaskManager {
     snapshot: { attempt: number; worker_pid: number | null; zcode_pid: number | null; started_at: string | null; heartbeat: ReturnType<TaskStore["readWorkerHeartbeat"]> },
     verdicts: { worker: ProbeVerdict; runtime: ProbeVerdict },
   ): void {
+    if (status.cleanup_unverified === true) {
+      // ADR-009 / review-round-1 R1: a latched descendant-cleanup failure is
+      // never cleared by recovery evidence — neither a persisted worker
+      // result, nor an outcome checkpoint, nor worker_lost finalization.
+      // Only a cancel's probe-verified, claimant-scan-gated release may
+      // clear it; occupancy is retained until then.
+      const occurrence = this.#counters.record("reconcile_latched_cleanup", "cleanup_unverified");
+      if (this.#counters.shouldEmit("reconcile_latched_cleanup", "cleanup_unverified")) {
+        this.#store.appendEvent(taskId, "cleanup_unverified", "Reconciliation skipped: a recorded tree-cleanup failure keeps the task occupied until a verified cancel releases it", {
+          count: occurrence.count,
+        }, this.#now().toISOString());
+      }
+      return;
+    }
     const persistedResult = this.#store.readResult(taskId);
     if (persistedResult && persistedResult.attempt === status.attempt) {
       // The worker wrote the result but died before updating the status file.
@@ -888,6 +1085,8 @@ export class BridgeTaskManager implements ProgressTaskManager {
       // Identity re-verification always happens fresh here, never from cache
       // (A2): a reused PID must never be signalled for the old executor.
       const verdicts = await this.#probeExecutors(probeSnapshot);
+      const workerFingerprint = typeof probeSnapshot.identity?.worker?.fingerprint === "string" ? probeSnapshot.identity.worker.fingerprint : null;
+      const runtimeFingerprint = typeof probeSnapshot.identity?.runtime?.fingerprint === "string" ? probeSnapshot.identity.runtime.fingerprint : null;
       if (status.cleanup_unverified) {
         if (probeSnapshot.worker_pid === null && probeSnapshot.zcode_pid === null) {
           throw new TaskManagerError("CANCEL_FAILED", "No worker or ZCode process identity is available to verify cleanup");
@@ -898,41 +1097,42 @@ export class BridgeTaskManager implements ProgressTaskManager {
         if (probeSnapshot.worker_pid !== null && verdicts.worker.state === "unknown") {
           throw new TaskManagerError("CANCEL_FAILED", `Worker cleanup could not be verified: worker probe returned ${verdicts.worker.reason_code}`);
         }
+        const verifiedRoots = new Set<number>();
         try {
           if (probeSnapshot.zcode_pid !== null && verdicts.runtime.state === "alive") {
-            await this.#terminateProcessTree(probeSnapshot.zcode_pid, { graceMs: 500, killWaitMs: 5_000 });
+            await this.#terminateProcessTree(probeSnapshot.zcode_pid, { graceMs: 500, killWaitMs: 5_000, expectedRootFingerprint: runtimeFingerprint });
             const after = (await this.#probeExecutors(probeSnapshot)).runtime;
             if (after.state === "alive") throw new Error("runtime still alive after termination");
             if (after.state === "unknown") throw new Error(`runtime exit could not be verified (${after.reason_code})`);
+            verifiedRoots.add(probeSnapshot.zcode_pid);
           }
           if (probeSnapshot.worker_pid !== null && verdicts.worker.state === "alive") {
-            await this.#terminateProcessTree(probeSnapshot.worker_pid, { graceMs: 500, killWaitMs: 5_000 });
+            await this.#terminateProcessTree(probeSnapshot.worker_pid, { graceMs: 500, killWaitMs: 5_000, expectedRootFingerprint: workerFingerprint });
+            verifiedRoots.add(probeSnapshot.worker_pid);
           }
         }
         catch (error) {
-          // A2-04: between the identity probe and taskkill the recorded
-          // process can exit naturally, so taskkill fails with "process not
-          // found" for a pid that is genuinely gone. The taskkill output is
-          // never trusted on its own: a fresh identity probe must prove the
-          // recorded runtime AND the recorded worker (when one applies) have
-          // both exited before this becomes an idempotent success. An unknown
-          // or alive recheck keeps cleanup_unverified and the directory
-          // occupied (A2-02/A2-05).
-          let recheck: { runtime: ProbeVerdict; worker: ProbeVerdict };
-          try {
-            recheck = await this.#probeExecutors(probeSnapshot);
-          } catch (recheckError) {
-            throw new TaskManagerError("CANCEL_FAILED", `ZCode cleanup could not be verified: ${String(error)}; re-verification failed: ${String(recheckError)}`);
+          // ADR-009: a termination failure means the tree state is unverified.
+          // It is never cleared by executor-only exit evidence — a known
+          // descendant/ownership failure keeps the directory occupied, and a
+          // later cancel re-enters this branch after fresh probes.
+          this.#recordCleanupFailure(taskId, status.attempt, error);
+          throw new TaskManagerError("CANCEL_FAILED", `ZCode cleanup could not be verified: ${error instanceof Error ? error.message : String(error)}`);
+        }
+        // Recorded pids whose tree was not itself verified-terminated in
+        // this cancel are gated by the read-only claimant scan: releasing on
+        // root-executor exit evidence alone could orphan an untracked
+        // descendant (ADR-009; unobserved intermediate ancestors remain
+        // outside any proof and are logged, not claimed complete).
+        const scanTargets = this.#claimantTargets(taskId, status.attempt, probeSnapshot).filter((target) => !verifiedRoots.has(target.pid));
+        if (scanTargets.length > 0) {
+          const scan = await this.#verifyTreeClean(scanTargets).catch((error: unknown) => {
+            throw new TaskManagerError("CANCEL_FAILED", `ZCode cleanup verification failed: ${error instanceof Error ? error.message : String(error)}`);
+          });
+          if (!scan.clean) {
+            this.#store.appendEvent(taskId, "cleanup_unverified", "Recorded-tree scan still observes live claimants; the task stays occupied", { live_pids: [...scan.livePids] }, this.#now().toISOString());
+            throw new TaskManagerError("CANCEL_FAILED", `ZCode cleanup could not be verified: ${String(scan.livePids.length)} recorded-tree process(es) still alive`);
           }
-          const runtimeRecorded = probeSnapshot.zcode_pid !== null;
-          const workerRecorded = probeSnapshot.worker_pid !== null;
-          if ((runtimeRecorded && recheck.runtime.state !== "exited") || (workerRecorded && recheck.worker.state !== "exited")) {
-            throw new TaskManagerError("CANCEL_FAILED", `ZCode cleanup could not be verified: ${String(error)}; re-verification observed runtime ${recheck.runtime.state} (${recheck.runtime.reason_code})${workerRecorded ? ` and worker ${recheck.worker.state} (${recheck.worker.reason_code})` : ""}`);
-          }
-          this.#store.appendEvent(taskId, "cleanup_race_resolved", "Termination raced a natural exit; a fresh identity probe confirmed the recorded processes exited", {
-            runtime_reason_code: recheck.runtime.reason_code,
-            worker_reason_code: recheck.worker.reason_code,
-          }, this.#now().toISOString());
         }
         if (status.status === "running") {
           const finishedAt = this.#now().toISOString();
@@ -1084,22 +1284,22 @@ export class BridgeTaskManager implements ProgressTaskManager {
       try {
         if (!(await waitForSafeExit())) {
           if (process.platform !== "win32" && status.zcode_pid && this.#isProcessRunning(status.zcode_pid)) {
-            await this.#terminateProcessTree(status.zcode_pid, { graceMs: 500, killWaitMs: 5_000 });
+            await this.#terminateProcessTree(status.zcode_pid, { graceMs: 500, killWaitMs: 5_000, expectedRootFingerprint: runtimeFingerprint });
           }
-          await this.#terminateProcessTree(pid, { graceMs: 500, killWaitMs: 5_000 });
+          await this.#terminateProcessTree(pid, { graceMs: 500, killWaitMs: 5_000, expectedRootFingerprint: workerFingerprint });
         }
       } catch (error) {
-        if (!(await waitForSafeExit())) {
-          const message = error instanceof Error ? error.message : String(error);
-          this.#store.writeStatus(taskId, {
-            error: `cancellation could not be verified: ${message}`,
-          });
-          this.#store.appendEvent(taskId, "cancel_failed", message, undefined, this.#now().toISOString());
-          throw new TaskManagerError(
-            "CANCEL_FAILED",
-            `process-tree termination for task ${taskId} (pid ${pid}) could not be verified: ${message}`,
-          );
-        }
+        // ADR-009: a termination failure is never absolved by the worker's
+        // own exit or result arriving meanwhile — descendants were not proven
+        // exited, so verified is not replaced by root exit and the directory
+        // stays occupied. A later cancel re-enters the cleanup_unverified
+        // flow with fresh probes and the recorded-tree scan.
+        this.#recordCleanupFailure(taskId, status.attempt, error);
+        const message = error instanceof Error ? error.message : String(error);
+        throw new TaskManagerError(
+          "CANCEL_FAILED",
+          `process-tree termination for task ${taskId} (pid ${pid}) could not be verified: ${message}`,
+        );
       }
       // The worker may have completed while termination was in flight; a
       // persisted terminal result always wins over our cancellation.

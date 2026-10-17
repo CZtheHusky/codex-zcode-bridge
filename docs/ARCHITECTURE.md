@@ -1,9 +1,9 @@
 # 当前架构
 
 > Status: AUTHORITATIVE
-> Last updated: 2026-10-15
-> Last verified: 2026-10-15，最新上游整合分支的验证结果见[审查说明](reports/2026-10-15-browser-and-transport-fixes.md)；旧版本实测与当前分支回归分别记录。
-> Verified against: 上游fae74e45033a50fb560c0014d1a6d60a7dc771d1 + 本分支修复；受测源码指纹见审查说明。
+> Last updated: 2026-10-17
+> Last verified: 2026-10-17，Windows 进程树身份绑定终止（ADR-009）经本机 Node 22.18.0/24.19.0 全量矩阵与 Codex 独立反例验证，证据在私有归档；其余沿承原核对范围。
+> Verified against: 0902236c488adf7a3280dfdc38401dfa9f41cb49 + 本分支修复；受测源码指纹见各修复记录。
 
 本文件描述当前代码，不是历史阶段的冻结设计。公共类型见 `src/interfaces.ts`，MCP schema 见 `src/mcp/schemas.ts`；共享边界见 [SHARED_CORE.md](SHARED_CORE.md)。
 
@@ -41,7 +41,7 @@ Manager 用进程内 promise 队列以及同一 data root 下的 `.tasks/.manage
 
 同一 data root 内，FIFO 队列按 worker 上限和执行路径重叠规则启动 detached worker。Spawner 显式传 attempt。worker 在进入 adapter 前通过 attempt 目录的永久 `execution.claim` 抢占执行权，拒绝重复、旧 attempt 和终态入场。`state.lock` 保护状态更新和结果提交；worker 提交还校验当前 attempt/非终态。Manager 的延迟 PID 写入只作用于仍 running 的同一 attempt。
 
-未启动 worker 可重拉一次；抢占过的 attempt 不会重复执行。已开始的 worker 不自动重跑。worker 丢失但记录的 ZCode PID 仍存活时保留占用，要求 `zcode_cancel` 验证清理。清理失败的终态任务也保留目录与 slot；续跑被拒绝，再次 cancel 或只读恢复探测确认退出后才释放，原 failed 结果不改写。进程恢复使用 PID 和启动 fingerprint；unknown 不当作已退出。Windows 强制清理先采集当前树及身份，再执行 taskkill，并核验采集到的根与后代均已退出；非零退出也可以由新退出证据解消，存活或 unknown 均不释放。公共错误使用稳定诊断代码，不转发本地化 taskkill 文本。采样后新建、根退出前已脱离树的后代，以及查询与发信号间的 PID 复用窗口仍属未充分验证边界。见 ADR-005。
+未启动 worker 可重拉一次；抢占过的 attempt 不会重复执行。已开始的 worker 不自动重跑。worker 丢失但记录的 ZCode PID 仍存活时保留占用，要求 `zcode_cancel` 验证清理。清理失败的终态任务也保留目录与 slot；续跑被拒绝，再次 cancel 或只读恢复探测确认退出后才释放，原 failed 结果不改写。进程恢复使用 PID 和启动 fingerprint；unknown 不当作已退出。Windows 强制清理按 ADR-009 执行：一个持久 PowerShell 事务 helper 为每个已验证成员持有原生句柄（持有期间 PID 不可复用），归属按创建时间表示区间与句柄精确时间零容差证明（早于父创建的旧记录在触碰前排除；同 100ns 不可区分即拒绝；自然退出父、未确认退出保守拒绝）；Windows 终止必须携带调用者期望根指纹，信号仅经"同一句柄内验证、同一句柄内 TerminateProcess"发出，不使用 taskkill /T；未解析 hold、候选消失、传输异常、helper 关闭失败均携带完整已知成员集合显式失败并保留占用。已记录的 tree-cleanup 失败以 `cleanup_unverified` 锁存：恢复与 worker 提交不得抹除证据；部分或无法恢复完整成员的记录保守阻断，完整 marker 回退及 legacy 无失败记录的 probe 恢复按 ADR-009 具体分支执行；已记录树失败的正常释放由后续 cancel 的新鲜 probe 与 claimant 扫描门控。公共错误使用稳定诊断代码，不转发本地化 taskkill 文本。已记录 PID 的 claimant 闭包外（未观察中间祖先）不可证明，不以完整清理名义宣称。见 ADR-005、ADR-009。
 
 worker 每 3 秒原子写入一次绑定 attempt 与 PID 的私有 heartbeat，字段含 session、turn、Bridge event 序号和已观测到的 ZCode event 序号。管理器遇到一次负向 PID 探测时，若 heartbeat 不超过 15 秒则暂缓失联判定。ZCode turn 完成后，worker 在清理进程前写入 outcome checkpoint，并在清理成功后更新验证标志；worker 在提交最终 result 之前退出时，管理器可据 checkpoint 恢复报告，清理未验证则保留 `cleanup_failed` 与 workspace 占用。
 

@@ -148,7 +148,12 @@ export interface ManagerFixture {
   spawned: Array<{ dataRoot: string; taskId: string; pid: number }>;
   pidsAlive: Set<number>;
   terminateCalls: number[];
+  /** expectedRootFingerprint received per termination call (null = none). */
+  terminateExpected: Array<string | null>;
   setTerminateError: (error: Error | null) => void;
+  /** Recorded-tree claimant scans requested by the manager (ADR-009). */
+  scanCalls: Array<Array<{ pid: number; fingerprint: string | null }>>;
+  setScanResult: (result: { clean: boolean; livePids: readonly number[] } | Error) => void;
   /** Moves the fake clock forward; the manager's injected now() reads it. */
   advanceMs: (ms: number) => void;
   makeTask: (overrides?: Partial<TaskPackage>) => TaskPackage;
@@ -167,15 +172,25 @@ export async function makeManagerFixture(options: {
   const spawned: Array<{ dataRoot: string; taskId: string; pid: number }> = [];
   const pidsAlive = new Set<number>();
   const terminateCalls: number[] = [];
+  const terminateExpected: Array<string | null> = [];
+  const scanCalls: Array<Array<{ pid: number; fingerprint: string | null }>> = [];
   let terminateError: Error | null = null;
+  let scanResult: { clean: boolean; livePids: readonly number[] } | Error = { clean: true, livePids: [] };
   const clockBaseMs = Date.UTC(2026, 8, 27, 0, 0, 0);
   let clockMs = 1_000;
 
-  const terminate: TerminateProcessTree = async (pid) => {
+  const terminate: TerminateProcessTree = async (pid, terminateOptions) => {
     terminateCalls.push(pid);
+    terminateExpected.push(terminateOptions?.expectedRootFingerprint ?? null);
     if (terminateError) throw terminateError;
     pidsAlive.delete(pid);
     return { pid, signal: "SIGKILL", verified: true };
+  };
+
+  const verifyTreeClean = async (targets: readonly { pid: number; fingerprint: string | null }[]) => {
+    scanCalls.push([...targets]);
+    if (scanResult instanceof Error) throw scanResult;
+    return scanResult;
   };
 
   const manager = new BridgeTaskManager({
@@ -189,6 +204,7 @@ export async function makeManagerFixture(options: {
     },
     isProcessRunning: (pid) => pidsAlive.has(pid),
     terminateProcessTree: terminate,
+    verifyTreeClean,
     pollIntervalMs: 0,
     maxConcurrentWorkers: options.maxConcurrentWorkers,
     workerStartGraceMs: options.workerStartGraceMs ?? 0,
@@ -203,8 +219,13 @@ export async function makeManagerFixture(options: {
     spawned,
     pidsAlive,
     terminateCalls,
+    terminateExpected,
     setTerminateError: (error) => {
       terminateError = error;
+    },
+    scanCalls,
+    setScanResult: (result) => {
+      scanResult = result;
     },
     advanceMs: (ms) => {
       clockMs += ms;
