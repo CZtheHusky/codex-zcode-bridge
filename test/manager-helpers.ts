@@ -18,6 +18,7 @@ import { BridgeTaskManager } from "../src/manager/task-manager.js";
 import { DirectWorkspaceProvider } from "../src/workspace/direct-provider.js";
 import type { ZCodeRunOutcome } from "../src/adapters/zcode-adapter.js";
 import type { TerminateProcessTree } from "../src/adapters/process-spawn.js";
+import { verifyWindowsRecordedTreeClaimants, type WindowsTreeTransactionLike } from "../src/adapters/windows-process-cleanup.js";
 import { SESSION_ID, validReport } from "./helpers.js";
 
 export type FakeBehavior =
@@ -165,6 +166,11 @@ export async function makeManagerFixture(options: {
   maxConcurrentWorkers?: number;
   /** Defaults to 0 (immediate worker_lost finalization) for legacy tests. */
   workerStartGraceMs?: number;
+  /** When provided, the manager's release gate runs the REAL recorded-tree
+   * claimant scan (verifyWindowsRecordedTreeClaimants) against the OS
+   * transaction returned by this factory — only the transport is faked; the
+   * scan logic and the whole manager cancel/occupancy path stay real. */
+  scanOpen?: () => Promise<WindowsTreeTransactionLike>;
 } = {}): Promise<ManagerFixture> {
   const dataRoot = await mkdtemp(path.join(tmpdir(), "zcode-bridge-mgr-"));
   const workspaceDir = await mkdtemp(path.join(tmpdir(), "zcode-bridge-ws-"));
@@ -187,11 +193,16 @@ export async function makeManagerFixture(options: {
     return { pid, signal: "SIGKILL", verified: true };
   };
 
-  const verifyTreeClean = async (targets: readonly { pid: number; fingerprint: string | null }[]) => {
-    scanCalls.push([...targets]);
-    if (scanResult instanceof Error) throw scanResult;
-    return scanResult;
-  };
+  const verifyTreeClean = options.scanOpen
+    ? async (targets: readonly { pid: number; fingerprint: string | null }[]) => {
+      scanCalls.push([...targets]);
+      return verifyWindowsRecordedTreeClaimants(targets, { open: options.scanOpen! });
+    }
+    : async (targets: readonly { pid: number; fingerprint: string | null }[]) => {
+      scanCalls.push([...targets]);
+      if (scanResult instanceof Error) throw scanResult;
+      return scanResult;
+    };
 
   const manager = new BridgeTaskManager({
     store,

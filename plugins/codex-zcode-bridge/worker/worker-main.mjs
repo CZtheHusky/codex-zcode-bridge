@@ -1144,10 +1144,14 @@ async function terminateWindowsProcessTree(pid, expectedRootTicks, killWaitMs, d
           naturalGoneCreation.set(member.pid, member.creationFileTime);
         }
       }
-      if (now() >= deadline) {
+      const unconfirmedMembers = members2.filter((m) => {
+        const record2 = killed.get(m.pid);
+        return record2 === void 0 || record2.exitFileTime === null;
+      });
+      if (now() >= deadline && unconfirmedMembers.length > 0) {
         throw new WindowsTreeCleanupError(
           "process_tree_cleanup_unverified",
-          `process_tree_cleanup_unverified: ${String(resolution.members.length)} recorded member(s) not provably exited`,
+          `process_tree_cleanup_unverified: ${String(unconfirmedMembers.length)} recorded member(s) not provably exited`,
           knownPids()
         );
       }

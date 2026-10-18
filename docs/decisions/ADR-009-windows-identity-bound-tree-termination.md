@@ -1,9 +1,11 @@
 # ADR-009 Windows 进程树身份绑定归属与终止
 
 > Status: DECISION
-> Last updated: 2026-10-17
-> Last verified: 2026-10-17（实现后本机验证：Windows Node 22.18.0 全量 461 项 460 pass/1 skip、Node 24.19.0 全量 461 项 459 pass/2 skip，均 0 fail；Codex 反例脚本 9 个（10 个运行用例，recovery-latch 含两种模式）全部 ok；有界真实 fixture 4/4。证据与命令输出存于本轮私有证据归档 `local/windows-process-ownership-20261017/worker/attempt-2/`，不在源码仓库内）
-> Verified against: 0902236c488adf7a3280dfdc38401dfa9f41cb49 + 本分支修复（含 review-round-1 R1–R4、review-round-1-addendum（absent 候选、传输预算、missing/truncated/repeated/repeated-truncated 成员证据）、review-round-2-callers C1 的全部返工）
+> Last updated: 2026-10-18
+> Last verified: 2026-10-18（attempt-6 行为修复经 Codex 独立验收：六组 fake 探针 × Node 22.18.0/24.16.0 全过；完整平台矩阵 Windows 22.18.0/24.16.0 全量 509 项（508/507 pass、1/2 平台专有 skip）、Windows 24.19.0 受影响九套件 152/152、Linux 22.18.0/24.20.0 全量 511 项（508/507 pass、3/4 平台专有 skip）均 0 fail，typecheck/build/validate:plugin/clean-entrypoints 通过——Linux 首次聚合 bundle 比较失败为评估器符号链接致来源注释差异，实体依赖重建后字节一致、原失败保留；维护者机器特定失败未复现边界保持。attempt-7 仅注释/文档收尾，行为字节不变。详见[公开返修报告](../reports/2026-10-18-pr47-claimant-repair.md)；原始输出存任务私有归档）
+> Verified against: 628984ca625a4d307b859d9f32d49e52e2d21ee6 + 本分支修复（含 review-round-1 R1–R4、review-round-1-addendum、review-round-2-callers C1 返工与 2026-10-18 PR #47 claimant/预算返修）
+
+> 编号说明：公开基线 0902236c488adf7a3280dfdc38401dfa9f41cb49 的 `docs/decisions/` 只有 ADR-001..008；"ADR-009" 是本 PR 分支自选编号。维护者本地整合若已占用 009，最终编号由维护者在整合时协调重排，本文件不据未公开源码猜测。
 
 ## 背景
 
@@ -44,7 +46,8 @@
 
 - 多轮：枚举→归属→（无存活成员即成功；否则逐个句柄绑定终止）→下一轮。动态后代经证明窗口同样被绑定终止；不可证明即保守失败。verified 只由"闭包内无存活成员"给出，根退出不构成证据。
 - manager：终止调用携带期望根指纹；任何终止失败 → `CANCEL_FAILED` + `cleanup_unverified` 锁存 + 成员记录；**对已记录 tree-cleanup 失败（记录或完整 marker 存在）的任务，恢复路径（persistedResult/checkpoint/worker_lost/terminal probe）在锁存期间保持占用**；无记录无 marker 的 legacy 终态锁存仍由根 probe 释放。worker 终态提交（`TaskStore.commitWorkerResult`）可保存结果但不得清锁存或覆盖成员证据（无论 patch 清除、重申还是省略该字段）；释放只能由后续 cancel 经新鲜 probe + recorded-tree claimant 扫描门控完成。
-- claimant 扫描的 `clean` 证明："**已记录 PID 名下没有存活的、属于我们或不可归属的 claimant**"——含指纹匹配的存活记录 PID 本身、其存活子代（传递闭包）、已死记录 PID 的存活子代（归属不可判定，保守计入）；已证外国换代的存活 PID 及其子树排除。未观察到的中间祖先在任何证明之外，调用方须记录该边界而非宣称完整。
+- claimant 扫描的 `clean` 证明："**已记录 PID 名下没有存活的、属于我们或不可归属的 claimant**"——含指纹匹配的存活记录 PID 本身、其存活子代（传递闭包）、已死记录 PID 的存活子代（归属不可判定，保守计入）；枚举与 hold 之间消失的记录 PID 视为已死，其存活子代同样计入（PR #47 P1-A：不得以过期枚举 live 集合证明 clean）。已证外国换代的存活 PID 本身排除，但其后代**逐边持有证明**后才排除（review-round-1 R1）：每条边的父代必须被持有（同句柄精确创建时间，且与枚举行同代一致），子代 CIM 表示区间**严格晚于**该精确创建时间才可证明属于外来代，随后子代自身也必须被持有且行代一致，其更深后代再依其持有精确时间递归判定；相等精度（表示区间触界）、更早、跨界、创建时间未知，以及中间代 absent/denied/换代/行句柄矛盾，一律保持占用。hold 响应按请求逐一校验（数量、PID、ok 必含可用精确身份字段），畸形证据拒绝扫描而非证明 clean（review-round-1 R2）。观察证据持久化（review-round-2 S2）：扫描 false 或拒绝时，任务相关观察（原始记录目标——即使某目标当前代已证换代，目标 PID 本身仍保留供按记录身份复扫；claimant；请求过但未证实的外来谱系候选；不新增已证外来的后代候选，不采信响应载荷任意 PID）经既有 cleanup-failure 记录与 marker 单调并入，后续 cancel/恢复/Manager 重建后的 scanTargets 取并集；已观察过的中间代不属于"未观察祖先"免责边界。空闭包最终仍正常释放。外来换代父不排除任何未经此证明的后代（PR #47 P1-B："外来换代父排除整棵子树"不是成立保证）。多记录根的证据单调合并（review-round-2 S1，review-round-3 T1 收紧）：某 PID 相对根 A 的记录证明为外来换代，不抹除它相对根 B 的 claimant 路径——它是已死记录成员的存活子代、claimant 后代或不可归属谱系后代时，claimant 证据优先，占用保持；排除只适用于对全部记录根都无 claimant 路径的 PID。记录目标自身的外来判定须先通过行/句柄同代一致（ticks 相等且精确时间落在行表示区间内）才可用该行为换代作证，否则按归属未证明保持占用；已判外来的记录目标仍按同一严格边规则接受入边检验（创建不严格晚于外来父的持有精确时间即降级为 claimant），缓存句柄不是全局排除证书；严格更晚且行句柄一致时复用缓存证据不重复 hold。行/句柄代矛盾（ticks 不符或精确时间出表示区间）按归属未证明保持占用，不按协议畸形抛错；协议畸形（响应数量、PID 对应、ok 缺精确身份字段或非十进制格式）才抛 process_tree_hold_invalid 拒绝扫描（review-round-2 复核口径）。未观察到的中间祖先在任何证明之外，调用方须记录该边界而非宣称完整。
+- 终止预算语义（PR #47 process-lock 返修）：kill 预算约束的是**等待退出**，不是已在持有句柄上证明的退出。截止时刻只对无确认退出 FILETIME 的成员触发 `process_tree_cleanup_unverified`；全部成员均已确认退出时继续确认轮直至闭包证明为空，整体仍受传输会话预算约束。已证明的机制：本机实测单次全表枚举 1.1–1.5s、两次枚举即占 5s 预算约六成，旧代码在枚举耗时或 WMI 滞留已终止成员行时会对"已确认退出"的成员误报 not provably exited（确定性回归覆盖）；维护者 24.16.0 失败在本机未复现，不做版本或根治宣称。
 
 ### D4 调用链身份交接（每代状态）
 
@@ -74,6 +77,43 @@
 - `node --test dist-test/test/process-spawn.test.js`（有界真实 fixture：正向身份绑定终止、错误指纹拒绝且零信号、缺身份拒绝、独立收束）：4/4。
 - Codex 反例脚本（存私有证据归档 evaluator/，新 attempt id 可重跑）：9 个脚本 / 10 个运行用例全部 ok——recovery-latch-probe（recover 与 corrupt-meta 两模式）、adversarial-cleanup、absent-candidate、missing-members、truncated-members、repeated-failure、repeated-truncated、worker-commit-latch、legacy-retry。
 - 全量：Windows Node 22.18.0 `node scripts/test-isolated.mjs` 461 项 460 pass/1 skip；Node 24.19.0 同命令 459 pass/2 skip；`npm run typecheck`、`npm run build`、`npm run validate:plugin`、`git diff --check` 均 exit 0。
+
+## PR #47 返修补充验证 — attempt-1（2026-10-18 源码版本；原始输出存任务私有归档 attempt-1/，下列计数属该版源码，勿与 attempt-2 计数叠加）
+
+- 维护者原始两 fake 反例（absent-after-enumeration、reused-parent-old-child）在反馈 head 记录 RED（clean=true 缺陷复现，exit 1），修复后同脚本 GREEN（clean=false、livePids=[102]，exit 0），零信号。
+- `node --test dist-test/test/windows-process-cleanup.test.js`：44/44（含 P1-A/P1-B 及组合矩阵、边界零容差、预算语义回归）。
+- `node --test dist-test/test/manager-claimant-gate.test.js`：3/3——真实 TaskManager 消费路径（cancel→probe→锁存→扫描门控→pump），fake 只作 OS 传输；false/reject 保持 `cleanup_unverified`、同目录后续任务不放行，可证明 clean 正常释放。
+- 受影响套件 `node --test dist-test/test/{windows-process-cleanup,windows-cleanup-review-regressions,manager-recovery-latch,manager-claimant-gate,task-manager}.test.js`：93/93；`process-lock` 全量 19/19。
+- 便携 Node 24.16.0（官方 SHASUMS256 校验）下两 process-lock 用例 2/2（修复前后各一次）；阶段计时探针（自建登记进程、信号前成员身份门禁）：24.16.0 与 24.19.0 各 8/8，terminate 全程 2.8–3.3s / 预算 5s，单次全表枚举 1.1–1.5s；维护者失败未在本机自然复现，边界如实记录。
+- 预算机制 RED→GREEN：head 驱动对"已确认退出成员的滞留行 + 截止超时"抛 `process_tree_cleanup_unverified`（缺陷复现），修复后 3 轮完成闭包证明。
+
+## PR #47 返修补充验证 — attempt-2 / review-round-1 R1–R4（2026-10-18 源码版本；以下均为 worker 自测，原始输出存任务私有归档 attempt-2/；本轮源码全量 492/490 pass/2 skip，受影响七套件 128/128，typecheck/build/validate:plugin/clean-entrypoints/git diff --check exit 0）
+
+- evaluator 契约探针（10 例，含 6 个 R1/R2 失败反例与 2 个正向对照）经 worker 在 Node 22.18.0 / 24.16.0 / 24.19.0 各 10/10 通过，零信号、helper 各关闭一次。
+- `node --test dist-test/test/windows-process-cleanup.test.js`（attempt-2 源码）：53/53——新增中间代 absent/denied/换代/行句柄矛盾保持占用、相等精度不判外来、被排除成员必须被持有且行代一致、R2 形状违规（错 PID、超量、缺精确字段、非数字时间）拒绝扫描。
+- `node --test dist-test/test/manager-claimant-gate.test.js`（attempt-2 源码）：4/4——P1-A 经指纹化记录根真正触发 absent hold（断言 hold 发生）；maxConcurrency=1 且不同执行目录验证 slot 保留；reject/畸形 hold 同路径保持占用；可证明 clean 释放并放行排队任务。
+- baseline-loader 复验：同一 Manager 测试在原缺陷扫描器（head 转译）下 4/4 全部 "Missing expected rejection" RED——包括 review-round-1 指出原先误 PASS 的 P1-A。
+- R1/R2 未改变终止驱动与预算语义；attempt-1 的预算机制独立复验（6 例）与 24.16.0 未复现边界继续有效，不重复执行真实阶段探针。
+
+## PR #47 返修补充验证 — attempt-3 / review-round-2 S1/S2（2026-10-18 源码版本；以下均为 worker 自测，原始输出存任务私有归档 attempt-3/）
+
+- evaluator `probe-recorded-roots.mjs`（只读复用）S1 四例 × Node 24.19.0/24.16.0/22.18.0：跨根 claimant（含目标序反转、孙代传播）保持占用，全外来正向释放。
+- evaluator `probe-manager-observed-history.mjs`（只读复用，新编译 dist-test）S2 两模式（正负检查）× 同三版本全过：false 与拒绝两路径均持久化观察，第二次 scanTargets 含并入 PID，task_2 保持 queued，空表后正常释放且 task_2 转 running。
+- 单元 `windows-process-cleanup` 59/59（新增 S1 四例与 S2 观察证据两例）；Manager 门禁 `manager-claimant-gate` 7/7（新增 S1 跨根、S2 false 持久化、S2 拒绝持久化），baseline-loader 复验原扫描器下 6/7 RED（S2-false 模式由 Manager 侧 livePids 兜底在旧扫描器下亦过；该模式旧候选 RED 由评估方 round2 探针证明）。
+- 受影响十套件 175 tests/174 pass/0 fail/1 skip；全量 501 tests/499 pass/0 fail/2 skip；typecheck/build/validate:plugin/clean-entrypoints(4/4)/git diff --check exit 0。前轮计数见 attempt-1/attempt-2 节，按版本分开不叠加。
+
+## PR #47 返修补充验证 — attempt-6 / review-round-3 T1（2026-10-18 源码版本；以下均为 worker 自测，原始输出存任务私有归档 attempt-6/；attempt-4/5 为 provider 额度中断，无实现产出，失败由调用方记录保留）
+
+- evaluator `probe-recorded-foreign-edges.mjs`（只读复用）5/5 × Node 22.18.0/24.16.0：修复前当前源码记录 RED（4 负例 clean:true、1 正例过），修复后同探针 GREEN。
+- evaluator `probe-root-row-generation.mjs`（只读复用）3/3 × 同两版本：修复前两处行/句柄代不一致误 clean，修复后占用保持；行句柄一致正例仍 clean。
+- 既有证据复验（修复后源码）：`probe-claimant-contract` 10/10 × Node 22.18.0/24.16.0/24.19.0；`probe-recorded-roots` 4/4 × 同三版本；`probe-manager-observed-history` 两模式 × Node 22.18.0/24.16.0。
+- 单元 `windows-process-cleanup` 67/67（新增 T1 八例：换代记录父子更早/等时/孙代传播/顺序反转/严格更晚正例、行句柄代不一致两形态与一致正例）；受影响九套件 116 tests/115 pass/0 fail/1 skip；全量 509 tests/507 pass/0 fail/2 skip；typecheck/build/validate:plugin/clean-entrypoints(4/4)/git diff --check exit 0（EOF 空白一次告警最小修复后 run2 exit 0，未重跑套件）。
+
+## 最终独立验收（2026-10-18，Codex 于冻结候选执行；本节为公开摘要，原始证据存任务私有归档）
+
+- 六组 fake 探针 × Node 22.18.0/24.16.0 全过（含正向释放对照，零真实信号）：契约 10、已死父跨根 4、记录外来边 5、根行代 3、观察历史 2 模式、真实 Manager 重建 2 模式。
+- 平台矩阵（测试/通过/跳过，均 0 fail；平台专有 skip 如实记录）：Windows 22.18.0 全量 509/508/1；Windows 24.16.0 全量 509/507/2；Windows 24.19.0 受影响九套件 152/152/0；Linux 22.18.0 全量 511/508/3；Linux 24.20.0 全量 511/507/4。typecheck/build/validate:plugin/clean-entrypoints(4/4) 通过；git diff --check 于 Windows 工作区通过。Linux 首次聚合 bundle 比较失败保留：评估器符号链接使 bundle 来源注释指向 ../deps 源路径，注释前缀归一化后无其他字节差异，实体依赖重建后与原始 bundle 字节一致并 validate 通过（未重跑全套）。
+- attempt-7 仅按 review-round-6 完成注释/文档/记录措辞修正，源码行为与 bundle 字节不变。
 
 ## 影响
 

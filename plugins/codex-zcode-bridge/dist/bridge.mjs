@@ -24241,10 +24241,14 @@ async function terminateWindowsProcessTree(pid, expectedRootTicks, killWaitMs, d
           naturalGoneCreation.set(member.pid, member.creationFileTime);
         }
       }
-      if (now() >= deadline) {
+      const unconfirmedMembers = members2.filter((m) => {
+        const record3 = killed.get(m.pid);
+        return record3 === void 0 || record3.exitFileTime === null;
+      });
+      if (now() >= deadline && unconfirmedMembers.length > 0) {
         throw new WindowsTreeCleanupError(
           "process_tree_cleanup_unverified",
-          `process_tree_cleanup_unverified: ${String(resolution.members.length)} recorded member(s) not provably exited`,
+          `process_tree_cleanup_unverified: ${String(unconfirmedMembers.length)} recorded member(s) not provably exited`,
           knownPids()
         );
       }
@@ -24360,12 +24364,53 @@ async function verifyWindowsRecordedTreeClaimants(targets, dependencies) {
   const transaction = await dependencies.open();
   let bodyError = null;
   const targetPids = targets.map((t) => t.pid).filter((p) => Number.isInteger(p) && p > 0);
+  const claimantPids = /* @__PURE__ */ new Set();
+  const foreignHeld = /* @__PURE__ */ new Map();
+  const unattributableLineagePids = /* @__PURE__ */ new Set();
+  const edgeVerifiedForeignPids = /* @__PURE__ */ new Set();
+  const requestedPids = /* @__PURE__ */ new Set();
+  const evidencePids = () => [
+    .../* @__PURE__ */ new Set([...targetPids, ...claimantPids, ...[...requestedPids].filter((pid) => !foreignHeld.has(pid))])
+  ];
+  const DECIMAL = /^\d{1,25}$/u;
+  const holdOneValidated = async (pid) => {
+    requestedPids.add(pid);
+    const outcomes = await transaction.hold([pid]);
+    if (outcomes.length !== 1) {
+      throw new WindowsTreeCleanupError(
+        "process_tree_hold_invalid",
+        `process_tree_hold_invalid: ${String(outcomes.length)} responses for 1 requested pid`,
+        evidencePids()
+      );
+    }
+    const outcome = outcomes[0];
+    if (outcome === void 0 || outcome.pid !== pid) {
+      throw new WindowsTreeCleanupError(
+        "process_tree_hold_invalid",
+        `process_tree_hold_invalid: unexpected pid ${String(outcome?.pid ?? "missing")} in hold response`,
+        evidencePids()
+      );
+    }
+    if (outcome.status === "ok") {
+      if (typeof outcome.creationFileTime !== "string" || !DECIMAL.test(outcome.creationFileTime) || typeof outcome.creationTicks !== "string" || !DECIMAL.test(outcome.creationTicks)) {
+        throw new WindowsTreeCleanupError(
+          "process_tree_hold_invalid",
+          `process_tree_hold_invalid: ok hold response for pid ${String(pid)} lacks usable exact identity fields`,
+          evidencePids()
+        );
+      }
+      return { status: "ok", creationFileTime: outcome.creationFileTime, creationTicks: outcome.creationTicks };
+    }
+    return { status: outcome.status };
+  };
   try {
     const rows = await transaction.enumerate();
     const live = /* @__PURE__ */ new Set();
     for (const row of rows) live.add(row.pid);
-    const claimantPids = /* @__PURE__ */ new Set();
-    const foreignPids = /* @__PURE__ */ new Set();
+    const rowsByPid = /* @__PURE__ */ new Map();
+    for (const row of rows) {
+      if (!rowsByPid.has(row.pid)) rowsByPid.set(row.pid, row);
+    }
     const recorded = /* @__PURE__ */ new Set();
     for (const target of targets) {
       if (!Number.isInteger(target.pid) || target.pid <= 0) continue;
@@ -24375,13 +24420,19 @@ async function verifyWindowsRecordedTreeClaimants(targets, dependencies) {
         claimantPids.add(target.pid);
         continue;
       }
-      const outcome = (await transaction.hold([target.pid]))[0];
-      if (outcome === void 0) throw new WindowsTreeCleanupError("process_tree_scan_invalid", "recorded-tree scan received no hold outcome");
+      const outcome = await holdOneValidated(target.pid);
       if (outcome.status === "ok") {
         if (outcome.creationTicks === target.fingerprint) claimantPids.add(target.pid);
-        else foreignPids.add(target.pid);
+        else {
+          const row = rowsByPid.get(target.pid);
+          if (row !== void 0 && row.startTicks !== null && row.creationFileTime !== null && outcome.creationTicks === row.startTicks && withinCimInterval(outcome.creationFileTime, row.creationFileTime)) {
+            foreignHeld.set(target.pid, { exact: outcome.creationFileTime });
+          } else {
+            claimantPids.add(target.pid);
+          }
+        }
       } else if (outcome.status === "absent") {
-        continue;
+        live.delete(target.pid);
       } else {
         claimantPids.add(target.pid);
       }
@@ -24389,20 +24440,49 @@ async function verifyWindowsRecordedTreeClaimants(targets, dependencies) {
     for (let changed = true; changed; ) {
       changed = false;
       for (const row of rows) {
-        if (claimantPids.has(row.pid) || foreignPids.has(row.pid)) continue;
-        const parentClaimed = claimantPids.has(row.parentPid);
-        const parentRecordedDead = recorded.has(row.parentPid) && !live.has(row.parentPid) && !foreignPids.has(row.parentPid);
-        if (parentClaimed || parentRecordedDead) {
+        if (claimantPids.has(row.pid)) continue;
+        if (claimantPids.has(row.parentPid) || unattributableLineagePids.has(row.parentPid) || recorded.has(row.parentPid) && !live.has(row.parentPid) && !foreignHeld.has(row.parentPid)) {
           claimantPids.add(row.pid);
           changed = true;
         }
       }
+      for (const row of rows) {
+        if (claimantPids.has(row.pid) || unattributableLineagePids.has(row.pid) || edgeVerifiedForeignPids.has(row.pid)) continue;
+        const foreignParent = foreignHeld.get(row.parentPid);
+        if (foreignParent === void 0) continue;
+        if (row.creationFileTime === null || BigInt(row.creationFileTime) <= BigInt(foreignParent.exact)) {
+          claimantPids.add(row.pid);
+          foreignHeld.delete(row.pid);
+          edgeVerifiedForeignPids.delete(row.pid);
+          changed = true;
+          continue;
+        }
+        if (foreignHeld.has(row.pid)) {
+          edgeVerifiedForeignPids.add(row.pid);
+          changed = true;
+          continue;
+        }
+        const outcome = await holdOneValidated(row.pid);
+        if (outcome.status === "absent") {
+          unattributableLineagePids.add(row.pid);
+        } else if (outcome.status === "ok" && row.startTicks !== null && outcome.creationTicks === row.startTicks && withinCimInterval(outcome.creationFileTime, row.creationFileTime)) {
+          foreignHeld.set(row.pid, { exact: outcome.creationFileTime });
+          edgeVerifiedForeignPids.add(row.pid);
+        } else {
+          claimantPids.add(row.pid);
+        }
+        changed = true;
+      }
     }
     const liveList = [...claimantPids].sort((a, b) => a - b);
-    return { clean: liveList.length === 0, livePids: liveList };
+    return { clean: liveList.length === 0, livePids: liveList, observedPids: evidencePids().sort((a, b) => a - b) };
   } catch (error2) {
     bodyError = error2;
-    throw error2;
+    if (error2 instanceof WindowsTreeCleanupError) {
+      throw error2.memberPids.length > 0 ? error2 : new WindowsTreeCleanupError(error2.code, error2.message, evidencePids());
+    }
+    const detail = error2 instanceof Error ? error2.message : String(error2);
+    throw new WindowsTreeCleanupError("process_tree_scan_failed", `process_tree_scan_failed: ${detail}`, evidencePids());
   } finally {
     let closeError = null;
     try {
@@ -24414,9 +24494,9 @@ async function verifyWindowsRecordedTreeClaimants(targets, dependencies) {
       const closeText = closeError instanceof Error ? closeError.message : String(closeError);
       if (bodyError !== null) {
         const originalText = bodyError instanceof Error ? bodyError.message : String(bodyError);
-        throw new WindowsTreeCleanupError("process_tree_scan_failed", `process_tree_scan_failed: ${originalText}; process_tree_close_failed: ${closeText}`, targetPids);
+        throw new WindowsTreeCleanupError("process_tree_scan_failed", `process_tree_scan_failed: ${originalText}; process_tree_close_failed: ${closeText}`, evidencePids());
       }
-      throw new WindowsTreeCleanupError("process_tree_close_failed", `process_tree_close_failed: ${closeText}`, targetPids);
+      throw new WindowsTreeCleanupError("process_tree_close_failed", `process_tree_close_failed: ${closeText}`, evidencePids());
     }
   }
 }
@@ -24838,7 +24918,7 @@ async function verifyProcessTreeClaimantsClean(targets) {
     return verifyWindowsRecordedTreeClaimants(targets, { open: openPowerShellTreeTransaction });
   }
   const live = targets.filter((t) => Number.isInteger(t.pid) && t.pid > 0 && isProcessTreeRunning(t.pid)).map((t) => t.pid);
-  return { clean: live.length === 0, livePids: live };
+  return { clean: live.length === 0, livePids: live, observedPids: live };
 }
 function childStillOnSpawnGeneration(child) {
   if (typeof child.pid !== "number" || !Number.isInteger(child.pid) || child.pid <= 0) return false;
@@ -26083,10 +26163,23 @@ var BridgeTaskManager = class _BridgeTaskManager {
         }
         const scanTargets = this.#claimantTargets(taskId, status.attempt, probeSnapshot).filter((target) => !verifiedRoots.has(target.pid));
         if (scanTargets.length > 0) {
+          const retainObserved = (observed, livePids, error2) => {
+            const fromError = error2 instanceof WindowsTreeCleanupError ? error2.memberPids : [];
+            const pids = [.../* @__PURE__ */ new Set([...observed ?? [], ...livePids ?? [], ...fromError])].filter((pid2) => Number.isSafeInteger(pid2) && pid2 > 0);
+            if (pids.length === 0) return;
+            const carrier = error2 instanceof WindowsTreeCleanupError && error2.memberPids.length > 0 ? error2 : new WindowsTreeCleanupError(
+              "process_tree_cleanup_unverified",
+              `recorded-tree scan keeps occupancy: ${pids.join(",")} still requires attribution`,
+              pids
+            );
+            this.#recordCleanupFailure(taskId, status.attempt, carrier);
+          };
           const scan = await this.#verifyTreeClean(scanTargets).catch((error2) => {
+            retainObserved(void 0, void 0, error2);
             throw new TaskManagerError("CANCEL_FAILED", `ZCode cleanup verification failed: ${error2 instanceof Error ? error2.message : String(error2)}`);
           });
           if (!scan.clean) {
+            retainObserved(scan.observedPids, scan.livePids);
             this.#store.appendEvent(taskId, "cleanup_unverified", "Recorded-tree scan still observes live claimants; the task stays occupied", { live_pids: [...scan.livePids] }, this.#now().toISOString());
             throw new TaskManagerError("CANCEL_FAILED", `ZCode cleanup could not be verified: ${String(scan.livePids.length)} recorded-tree process(es) still alive`);
           }

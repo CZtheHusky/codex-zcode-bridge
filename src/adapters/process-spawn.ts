@@ -153,23 +153,44 @@ export const terminateProcessTree: TerminateProcessTree = async (pid, options = 
  * Read-only verification used by the manager after a failed termination:
  * reports live processes that currently claim any recorded pid as their
  * parent (transitively), plus recorded pids still alive under their recorded
- * generation. A live recorded pid whose current generation differs is a
- * proven foreign owner and its subtree is excluded. It proves "nothing
- * provably-ours-or-unattributable is alive right now"; unobserved
- * intermediate ancestors remain outside any proof and callers must log that
- * boundary instead of claiming completeness.
+ * generation. A live recorded pid whose current generation differs counts
+ * as foreign only after its row and held handle prove the same generation,
+ * and even then it keeps obeying the all-recorded-roots incoming-edge proof
+ * (review-round-3 T1): the pid itself is excluded only on that basis, and a
+ * descendant is excluded with it ONLY when every edge of its lineage carries
+ * held-handle evidence — the parent of each edge is held (exact creation from that same
+ * handle, row-generation consistent) and the child's creation representation
+ * lies STRICTLY after it; equal, earlier, or unknown times, absent/denied/
+ * replaced intermediates, and malformed hold responses are unproven and stay
+ * claimants or refuse the scan (PR #47 P1-B, review-round-1 R1/R2). A
+ * recorded pid that vanishes between enumeration and hold is dead: its live
+ * children stay claimants like any dead recorded pid's (PR #47 P1-A). It
+ * proves "nothing provably-ours-or-unattributable is alive right now";
+ * unobserved intermediate ancestors remain outside any proof and callers
+ * must log that boundary instead of claiming completeness.
  */
 export interface TreeClaimantTarget {
   readonly pid: number;
   readonly fingerprint: string | null;
 }
 
-export async function verifyProcessTreeClaimantsClean(targets: readonly TreeClaimantTarget[]): Promise<{ clean: boolean; livePids: readonly number[] }> {
+export interface TreeClaimantsResult {
+  readonly clean: boolean;
+  readonly livePids: readonly number[];
+  /** Task-relevant pids this scan actually involved (targets, requested
+   * candidates, claimants) for durable retention on a false/rejected result
+   * (review-round-2 S2). Original targets are always retained — even when
+   * their current generation is proven foreign — and only newly
+   * proven-foreign descendant candidates are omitted. */
+  readonly observedPids: readonly number[];
+}
+
+export async function verifyProcessTreeClaimantsClean(targets: readonly TreeClaimantTarget[]): Promise<TreeClaimantsResult> {
   if (process.platform === "win32") {
     return verifyWindowsRecordedTreeClaimants(targets, { open: openPowerShellTreeTransaction });
   }
   const live = targets.filter((t) => Number.isInteger(t.pid) && t.pid > 0 && isProcessTreeRunning(t.pid)).map((t) => t.pid);
-  return { clean: live.length === 0, livePids: live };
+  return { clean: live.length === 0, livePids: live, observedPids: live };
 }
 
 // -- Spawn-generation continuity (ADR-009) ----------------------------------

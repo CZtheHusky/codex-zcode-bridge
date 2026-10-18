@@ -468,10 +468,22 @@ export async function terminateWindowsProcessTree(
         // wait_timeout / error: the member stays unresolved; the next round
         // retries until the deadline refuses.
       }
-      if (now() >= deadline) {
+      // The kill budget bounds WAITING for exits, not exits already proven on
+      // held handles (PR #47 process-lock investigation): a member whose exit
+      // FILETIME was read from its held handle IS provably exited, and a
+      // full-table enumeration that ran slow must not turn that proof into a
+      // false "not provably exited" failure. Only members WITHOUT a confirmed
+      // exit trip the deadline; confirmation rounds for confirmed members
+      // continue until the closure provably empties, still bounded end-to-end
+      // by the transport session budget.
+      const unconfirmedMembers = members.filter((m) => {
+        const record = killed.get(m.pid);
+        return record === undefined || record.exitFileTime === null;
+      });
+      if (now() >= deadline && unconfirmedMembers.length > 0) {
         throw new WindowsTreeCleanupError(
           "process_tree_cleanup_unverified",
-          `process_tree_cleanup_unverified: ${String(resolution.members.length)} recorded member(s) not provably exited`,
+          `process_tree_cleanup_unverified: ${String(unconfirmedMembers.length)} recorded member(s) not provably exited`,
           knownPids(),
         );
       }
@@ -615,29 +627,145 @@ function orderChildrenFirst(members: readonly MemberRecord[]): MemberRecord[] {
  * Read-only recorded-tree scan: reports live processes that currently claim
  * any of the recorded pids as their parent, transitively. A recorded pid that
  * is alive with a MATCHING startup fingerprint is itself a claimant; one
- * alive with a different fingerprint is a proven foreign generation — its
- * subtree is excluded from the claim. A recorded pid without a fingerprint
- * that is alive stays a claimant (unprovable, conservative). Children of
+ * alive with a different fingerprint is treated as a foreign generation ONLY
+ * after its enumeration row and held handle prove to describe the SAME
+ * generation, and even then it stays subject to the all-recorded-roots
+ * incoming-edge proof below (review-round-3 T1) — a mismatch alone neither
+ * excludes the pid nor certifies its row's lineage. A foreign-generation pid
+ * is excluded, and a descendant is excluded with it ONLY when every edge of
+ * its lineage is proven on held handles:
+ *  - the parent of the edge is HELD (native handle, exact creation FILETIME
+ *    and ticks from that same handle) and therefore provably owned its pid
+ *    continuously from that creation until now, so a child whose CIM
+ *    representation lies STRICTLY after the parent's exact creation was
+ *    created during that ownership — equal, earlier, boundary-straddling, or
+ *    unknown times are unproven and stay claimants (ADR-009 same-100ns rule;
+ *    PR #47 review-round-1 R1: an unheld enumeration row alone proves
+ *    nothing about pid ownership across the descendant's creation);
+ *  - the excluded member itself must then be held with a row-consistent
+ *    identity (same-generation handle) before ITS descendants may be
+ *    classified — absent, denied, replaced-generation, or malformed evidence
+ *    at any intermediate level keeps the subtree occupied.
+ * Evidence from ALL recorded roots combines MONOTONICALLY (review-round-2
+ * S1): a pid excluded as foreign relative to one recorded identity can still
+ * be ours-or-unattributable relative to another (e.g. a live child of a dead
+ * recorded member that happens to reuse another recorded pid). Claimant
+ * evidence from any root always wins over foreign exclusion; the exclusion
+ * only ever applies to pids with no claimant path from any root. A recorded
+ * target's own foreign classification is held to the SAME proof as any
+ * candidate (review-round-3 T1): the fingerprint mismatch must be backed by
+ * a row/handle generation-consistent hold before the row may vouch for the
+ * replacement, and the row's incoming edge is judged against foreign-held
+ * parents like anyone else's — a cached foreign status is never a global
+ * exclusion certificate, and strictly-later proven edges reuse the cached
+ * hold without repeating it.
+ * A recorded pid without a fingerprint that is alive stays a claimant
+ * (unprovable, conservative). A recorded pid that vanishes between
+ * enumeration and hold is dead: its live children count as claimants exactly
+ * like children of any other dead recorded pid (PR #47 P1-A). Children of
  * dead recorded pids count as claimants: their creator is unattributable
  * after the fact, and releasing while one is alive could orphan our own
- * process. This proves "nothing provably-ours-or-unattributable is alive
- * right now"; it does NOT prove no process ever descended from the recorded
- * pids (unobserved intermediate ancestors remain outside any proof), and
- * callers must log that boundary instead of claiming completeness.
+ * process. Hold responses are validated against the request (count, pid,
+ * mandatory identity fields) before any proof is drawn from them
+ * (review-round-1 R2); malformed evidence refuses the scan instead of
+ * proving a false clean. This proves "nothing provably-ours-or-unattributable
+ * is alive right now"; it does NOT prove no process ever descended from the
+ * recorded pids (unobserved intermediate ancestors remain outside any
+ * proof), and callers must log that boundary instead of claiming
+ * completeness.
+ *
+ * Observation evidence (review-round-2 S2): `observedPids` (and the member
+ * set carried by every exception) reports the TASK-RELEVANT pids this scan
+ * actually involved — the recorded targets, every pid it asked the helper to
+ * hold (foreign-lineage edge candidates), and the claimants — so a caller
+ * can persist them before keeping occupancy and cover them on later scans.
+ * Pids taken from response payloads are never trusted as observations. The
+ * ORIGINAL recorded targets stay in the evidence even when their current
+ * generation is proven foreign (later scans re-judge them under their
+ * recorded identity); only NEWLY proven-foreign descendant candidates are
+ * omitted from the added evidence — persisting those would make a later
+ * fingerprint-less scan count them as claimants forever. A pid already
+ * observed here is not an "unobserved ancestor" for later scans.
  */
 export async function verifyWindowsRecordedTreeClaimants(
   targets: readonly { pid: number; fingerprint: string | null }[],
   dependencies: WindowsCleanupDependencies,
-): Promise<{ clean: boolean; livePids: readonly number[] }> {
+): Promise<{ clean: boolean; livePids: readonly number[]; observedPids: readonly number[] }> {
   const transaction = await dependencies.open();
   let bodyError: unknown = null;
   const targetPids = targets.map((t) => t.pid).filter((p) => Number.isInteger(p) && p > 0);
+  const claimantPids = new Set<number>();
+  /** Members whose foreign lineage is proven on a HELD, row-consistent
+   * handle: `exact` is the held handle's exact creation FILETIME. */
+  const foreignHeld = new Map<number, { readonly exact: string }>();
+  /** Lineage members that are dead (absent at hold) but unattributable:
+   * not occupied themselves, but their live children cannot be proven
+   * foreign and stay claimants. */
+  const unattributableLineagePids = new Set<number>();
+  /** Pids whose incoming parent edge has been PROVEN strictly-later against
+   * a held, row-consistent foreign parent (their cached hold evidence needs
+   * no re-verification in later sweeps). */
+  const edgeVerifiedForeignPids = new Set<number>();
+  /** Every pid this scan asked the helper to hold — observation evidence
+   * only ever comes from our own requests, never from response payloads. */
+  const requestedPids = new Set<number>();
+  /** Task-relevant observation evidence: targets + claimants + requested
+   * pids that were not proven foreign (proven-foreign pids are omitted so a
+   * later fingerprint-less scan cannot count them as claimants forever). */
+  const evidencePids = (): number[] => [
+    ...new Set([...targetPids, ...claimantPids, ...[...requestedPids].filter((pid) => !foreignHeld.has(pid))]),
+  ];
+  const DECIMAL = /^\d{1,25}$/u;
+  /** A hold response whose shape was validated: ok outcomes carry both
+   * exact identity fields as well-formed decimal strings. */
+  type ValidatedHold =
+    | { readonly status: "ok"; readonly creationFileTime: string; readonly creationTicks: string }
+    | { readonly status: "absent" | "denied" | "error" };
+  /** Holds exactly one pid and validates the response shape before any
+   * caller draws identity evidence from it (review-round-1 R2): the count,
+   * the pid, and — for ok outcomes — both exact identity fields must be
+   * present and well-formed. Anything else is a protocol failure, never a
+   * proof of anything; the failure carries the observation evidence
+   * gathered so far (review-round-2 S2). */
+  const holdOneValidated = async (pid: number): Promise<ValidatedHold> => {
+    requestedPids.add(pid);
+    const outcomes = await transaction.hold([pid]);
+    if (outcomes.length !== 1) {
+      throw new WindowsTreeCleanupError(
+        "process_tree_hold_invalid",
+        `process_tree_hold_invalid: ${String(outcomes.length)} responses for 1 requested pid`,
+        evidencePids(),
+      );
+    }
+    const outcome = outcomes[0];
+    if (outcome === undefined || outcome.pid !== pid) {
+      throw new WindowsTreeCleanupError(
+        "process_tree_hold_invalid",
+        `process_tree_hold_invalid: unexpected pid ${String(outcome?.pid ?? "missing")} in hold response`,
+        evidencePids(),
+      );
+    }
+    if (outcome.status === "ok") {
+      if (typeof outcome.creationFileTime !== "string" || !DECIMAL.test(outcome.creationFileTime) ||
+        typeof outcome.creationTicks !== "string" || !DECIMAL.test(outcome.creationTicks)) {
+        throw new WindowsTreeCleanupError(
+          "process_tree_hold_invalid",
+          `process_tree_hold_invalid: ok hold response for pid ${String(pid)} lacks usable exact identity fields`,
+          evidencePids(),
+        );
+      }
+      return { status: "ok", creationFileTime: outcome.creationFileTime, creationTicks: outcome.creationTicks };
+    }
+    return { status: outcome.status };
+  };
   try {
     const rows = await transaction.enumerate();
     const live = new Set<number>();
     for (const row of rows) live.add(row.pid);
-    const claimantPids = new Set<number>();
-    const foreignPids = new Set<number>();
+    const rowsByPid = new Map<number, WindowsProcessRow>();
+    for (const row of rows) {
+      if (!rowsByPid.has(row.pid)) rowsByPid.set(row.pid, row);
+    }
     const recorded = new Set<number>();
     for (const target of targets) {
       if (!Number.isInteger(target.pid) || target.pid <= 0) continue;
@@ -647,13 +775,36 @@ export async function verifyWindowsRecordedTreeClaimants(
         claimantPids.add(target.pid);
         continue;
       }
-      const outcome = (await transaction.hold([target.pid]))[0];
-      if (outcome === undefined) throw new WindowsTreeCleanupError("process_tree_scan_invalid", "recorded-tree scan received no hold outcome");
+      const outcome = await holdOneValidated(target.pid);
       if (outcome.status === "ok") {
         if (outcome.creationTicks === target.fingerprint) claimantPids.add(target.pid);
-        else foreignPids.add(target.pid);
+        else {
+          // Review-round-3 T1(B): a fingerprint mismatch only proves the
+          // CURRENT holder differs from the RECORD — it says nothing about
+          // the enumerated row's lineage. The row may vouch for the held
+          // generation only when row and handle describe the SAME generation
+          // (ticks equal AND the exact time inside the row's representation
+          // interval), exactly as required of excluded intermediates. An
+          // inconsistent or unknown row cannot prove the replacement's
+          // parentage: keep the pid occupied.
+          const row = rowsByPid.get(target.pid);
+          if (
+            row !== undefined && row.startTicks !== null && row.creationFileTime !== null &&
+            outcome.creationTicks === row.startTicks &&
+            withinCimInterval(outcome.creationFileTime, row.creationFileTime)
+          ) {
+            foreignHeld.set(target.pid, { exact: outcome.creationFileTime });
+          } else {
+            claimantPids.add(target.pid);
+          }
+        }
       } else if (outcome.status === "absent") {
-        continue; // exited between enumeration and hold
+        // Vanished between enumeration and hold: it is dead now, so its live
+        // children are children of a dead recorded pid — claimants. Dropping
+        // it from the live set is what makes parentRecordedDead fire for them
+        // (PR #47 P1-A); keeping it would leave the stale enumeration snapshot
+        // vouching for a process that no longer exists.
+        live.delete(target.pid);
       } else {
         // denied/error: identity unreadable; never treat as provably gone.
         claimantPids.add(target.pid);
@@ -661,21 +812,94 @@ export async function verifyWindowsRecordedTreeClaimants(
     }
     for (let changed = true; changed;) {
       changed = false;
+      // Claimant-path sweep (review-round-2 S1): evaluated for EVERY row —
+      // a pid already excluded as foreign relative to one recorded root can
+      // still be ours-or-unattributable relative to another (a live child of
+      // a dead recorded member that reused another recorded pid, a descendant
+      // of a claimant, or of an unattributable lineage member). Claimant
+      // evidence from ANY root wins over foreign exclusion; exclusion only
+      // ever applies to pids with no claimant path at all.
       for (const row of rows) {
-        if (claimantPids.has(row.pid) || foreignPids.has(row.pid)) continue;
-        const parentClaimed = claimantPids.has(row.parentPid);
-        const parentRecordedDead = recorded.has(row.parentPid) && !live.has(row.parentPid) && !foreignPids.has(row.parentPid);
-        if (parentClaimed || parentRecordedDead) {
+        if (claimantPids.has(row.pid)) continue;
+        if (
+          claimantPids.has(row.parentPid) ||
+          unattributableLineagePids.has(row.parentPid) ||
+          (recorded.has(row.parentPid) && !live.has(row.parentPid) && !foreignHeld.has(row.parentPid))
+        ) {
           claimantPids.add(row.pid);
           changed = true;
         }
       }
+      // Foreign-lineage exclusion sweep (review-round-3 T1: a cached
+      // foreign-held status — including one initialized from a recorded
+      // target — is NOT a global exclusion certificate). Every row whose
+      // incoming edge has not yet been proven is judged against a
+      // foreign-held parent with the SAME strict edge rule, recorded targets
+      // included: a row created at-or-before the parent's held exact creation
+      // is an old-generation child of the recorded parent pid or
+      // unattributable, and is demoted to a claimant even if it was already
+      // foreign relative to its OWN record.
+      for (const row of rows) {
+        if (claimantPids.has(row.pid) || unattributableLineagePids.has(row.pid) || edgeVerifiedForeignPids.has(row.pid)) continue;
+        const foreignParent = foreignHeld.get(row.parentPid);
+        if (foreignParent === undefined) continue; // parent outside this tree or still pending a later sweep
+        // The held foreign parent provably owned its pid continuously since
+        // its exact creation F. A row created STRICTLY after F (whole CIM
+        // representation interval beyond F; equality is the ADR-009
+        // indistinguishable case, earlier rows are old-generation children)
+        // is a candidate foreign descendant — but the candidate itself must
+        // be held and row-consistent before it, in turn, may be excluded: an
+        // unheld snapshot row proves nothing about pid ownership across its
+        // own descendants (review-round-1 R1).
+        if (row.creationFileTime === null || BigInt(row.creationFileTime) <= BigInt(foreignParent.exact)) {
+          claimantPids.add(row.pid);
+          foreignHeld.delete(row.pid);
+          edgeVerifiedForeignPids.delete(row.pid);
+          changed = true;
+          continue;
+        }
+        if (foreignHeld.has(row.pid)) {
+          // Already held and row-consistent (target initialization above or a
+          // previous sweep pass): the strictly-later edge is proven with the
+          // CACHED evidence — no repeat hold is issued.
+          edgeVerifiedForeignPids.add(row.pid);
+          changed = true;
+          continue;
+        }
+        const outcome = await holdOneValidated(row.pid);
+        if (outcome.status === "absent") {
+          unattributableLineagePids.add(row.pid);
+        } else if (
+          outcome.status === "ok" &&
+          row.startTicks !== null &&
+          outcome.creationTicks === row.startTicks &&
+          withinCimInterval(outcome.creationFileTime, row.creationFileTime)
+        ) {
+          // Same-generation handle and row: excluded as a proven foreign
+          // descendant, and its own children will be judged against ITS held
+          // exact creation in a later sweep.
+          foreignHeld.set(row.pid, { exact: outcome.creationFileTime });
+          edgeVerifiedForeignPids.add(row.pid);
+        } else {
+          // denied/error, or a replaced generation (handle ticks or exact
+          // time inconsistent with the enumerated row): alive but unprovable.
+          claimantPids.add(row.pid);
+        }
+        changed = true;
+      }
     }
     const liveList = [...claimantPids].sort((a, b) => a - b);
-    return { clean: liveList.length === 0, livePids: liveList };
+    return { clean: liveList.length === 0, livePids: liveList, observedPids: evidencePids().sort((a, b) => a - b) };
   } catch (error) {
     bodyError = error;
-    throw error;
+    // Review-round-2 S2: EVERY exception exit carries the task-relevant
+    // observation evidence (targets + claimants + requested-but-unproven
+    // candidates), never pids taken from response payloads.
+    if (error instanceof WindowsTreeCleanupError) {
+      throw error.memberPids.length > 0 ? error : new WindowsTreeCleanupError(error.code, error.message, evidencePids());
+    }
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new WindowsTreeCleanupError("process_tree_scan_failed", `process_tree_scan_failed: ${detail}`, evidencePids());
   } finally {
     // R4: the read-only scan must not claim a result through a silently
     // failed helper close either; a close failure is chained onto a body
@@ -690,9 +914,9 @@ export async function verifyWindowsRecordedTreeClaimants(
       const closeText = closeError instanceof Error ? closeError.message : String(closeError);
       if (bodyError !== null) {
         const originalText = bodyError instanceof Error ? bodyError.message : String(bodyError);
-        throw new WindowsTreeCleanupError("process_tree_scan_failed", `process_tree_scan_failed: ${originalText}; process_tree_close_failed: ${closeText}`, targetPids);
+        throw new WindowsTreeCleanupError("process_tree_scan_failed", `process_tree_scan_failed: ${originalText}; process_tree_close_failed: ${closeText}`, evidencePids());
       }
-      throw new WindowsTreeCleanupError("process_tree_close_failed", `process_tree_close_failed: ${closeText}`, targetPids);
+      throw new WindowsTreeCleanupError("process_tree_close_failed", `process_tree_close_failed: ${closeText}`, evidencePids());
     }
   }
 }

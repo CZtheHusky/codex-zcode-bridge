@@ -32,6 +32,7 @@ import type { ZCodeRunOutcome } from "../adapters/zcode-adapter.js";
 import { TaskManagerError } from "./errors.js";
 import { defaultSpawnWorker, type SpawnWorker } from "./spawn-worker.js";
 import { isProcessRunning, terminateProcessTree, verifyProcessTreeClaimantsClean, type TerminateProcessTree, type TreeClaimantTarget } from "../adapters/process-spawn.js";
+import { WindowsTreeCleanupError } from "../adapters/windows-process-cleanup.js";
 import { validateTaskTimeout } from "../runtime/task-timeout.js";
 import { tryAcquireProcessLock, withProcessLock, publishSelfIdentity } from "../store/process-lock.js";
 import { buildTaskPrompt, buildContinuePrompt } from "../prompts/task-prompt.js";
@@ -52,7 +53,7 @@ export interface TaskManagerOptions {
   /** Defaults to real process-tree termination with verification. */
   terminateProcessTree?: TerminateProcessTree;
   /** Defaults to the read-only recorded-tree claimant scan (ADR-009). */
-  verifyTreeClean?: (targets: readonly TreeClaimantTarget[]) => Promise<{ clean: boolean; livePids: readonly number[] }>;
+  verifyTreeClean?: (targets: readonly TreeClaimantTarget[]) => Promise<{ clean: boolean; livePids: readonly number[]; observedPids?: readonly number[] }>;
   /** Defaults to the platform ProcessProbe (Windows PowerShell batch / Linux
    * /proc / macOS ps). Recovery and cleanup identity checks use it. */
   probe?: ProcessProbe;
@@ -79,7 +80,7 @@ export class BridgeTaskManager implements ProgressTaskManager {
   readonly #spawnWorker: SpawnWorker;
   readonly #isProcessRunning: (pid: number) => boolean;
   readonly #terminateProcessTree: TerminateProcessTree;
-  readonly #verifyTreeClean: (targets: readonly TreeClaimantTarget[]) => Promise<{ clean: boolean; livePids: readonly number[] }>;
+  readonly #verifyTreeClean: (targets: readonly TreeClaimantTarget[]) => Promise<{ clean: boolean; livePids: readonly number[]; observedPids?: readonly number[] }>;
   readonly #probe: ProcessProbe | null;
   readonly #now: () => Date;
   readonly #dataRoot: string;
@@ -1126,10 +1127,34 @@ export class BridgeTaskManager implements ProgressTaskManager {
         // outside any proof and are logged, not claimed complete).
         const scanTargets = this.#claimantTargets(taskId, status.attempt, probeSnapshot).filter((target) => !verifiedRoots.has(target.pid));
         if (scanTargets.length > 0) {
+          // Review-round-2 S2: whenever the scan keeps occupancy — false OR
+          // rejected — the task-relevant pids it actually observed/requested
+          // join the durable member evidence through the SAME monotonic
+          // cleanup-failure record and marker used for termination
+          // failures, so a later cancel (or a recreated manager) still scans
+          // them; a pid already observed here is not an "unobserved
+          // ancestor" later. Only pids the scan itself reports as its own
+          // observation evidence are retained — never arbitrary pids from
+          // malformed response payloads — and a clean scan records nothing.
+          const retainObserved = (observed: readonly number[] | undefined, livePids: readonly number[] | undefined, error?: unknown): void => {
+            const fromError = error instanceof WindowsTreeCleanupError ? error.memberPids : [];
+            const pids = [...new Set([...(observed ?? []), ...(livePids ?? []), ...fromError])].filter((pid) => Number.isSafeInteger(pid) && pid > 0);
+            if (pids.length === 0) return;
+            const carrier = error instanceof WindowsTreeCleanupError && error.memberPids.length > 0
+              ? error
+              : new WindowsTreeCleanupError(
+                "process_tree_cleanup_unverified",
+                `recorded-tree scan keeps occupancy: ${pids.join(",")} still requires attribution`,
+                pids,
+              );
+            this.#recordCleanupFailure(taskId, status.attempt, carrier);
+          };
           const scan = await this.#verifyTreeClean(scanTargets).catch((error: unknown) => {
+            retainObserved(undefined, undefined, error);
             throw new TaskManagerError("CANCEL_FAILED", `ZCode cleanup verification failed: ${error instanceof Error ? error.message : String(error)}`);
           });
           if (!scan.clean) {
+            retainObserved(scan.observedPids, scan.livePids);
             this.#store.appendEvent(taskId, "cleanup_unverified", "Recorded-tree scan still observes live claimants; the task stays occupied", { live_pids: [...scan.livePids] }, this.#now().toISOString());
             throw new TaskManagerError("CANCEL_FAILED", `ZCode cleanup could not be verified: ${String(scan.livePids.length)} recorded-tree process(es) still alive`);
           }
