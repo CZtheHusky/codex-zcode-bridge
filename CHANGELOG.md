@@ -4,6 +4,15 @@
 
 当前版本以 `package.json` 和 Release Please manifest 为准。提交推送到 `master` 后，Release Please 会在有待发布变更时创建发布 PR，并同步更新版本文件与本日志；合并发布 PR 后会生成对应 Git tag 和 GitHub Release。
 
+## [1.2.7](https://github.com/Sandyzzx/codex-zcode-bridge/compare/codex-zcode-bridge-v1.2.6...codex-zcode-bridge-v1.2.7) (2026-10-19)
+
+
+### Bug Fixes
+
+* harden Windows process ownership and cleanup ([628984c](https://github.com/Sandyzzx/codex-zcode-bridge/commit/628984ca625a4d307b859d9f32d49e52e2d21ee6))
+* harden Windows process ownership, lock cleanup and root validation ([73af9d6](https://github.com/Sandyzzx/codex-zcode-bridge/commit/73af9d60ff9bbcbbc1ae1d7b1f9b9fb9fca48bb0))
+* preserve claimant evidence across process generations ([73d4a73](https://github.com/Sandyzzx/codex-zcode-bridge/commit/73d4a731c5e8d34e4ff6f8ec146eb07c8598778b))
+
 ## [1.2.6](https://github.com/Sandyzzx/codex-zcode-bridge/compare/codex-zcode-bridge-v1.2.5...codex-zcode-bridge-v1.2.6) (2026-10-16)
 
 
