@@ -1,7 +1,7 @@
 # 文档索引 / Documentation
 
 > Status: AUTHORITATIVE（仅指本索引）
-> Last updated: 2026-10-14
+> Last updated: 2026-10-18
 
 英文使用者从 [README.md](../README.md) 开始。技术文档为中文。本文是文档路由：先看状态等级，再按读者路径选文档。
 
@@ -48,8 +48,8 @@ English readers start at [README.md](../README.md). This index is bilingual; the
 |---|---|---|---|
 | [README.md](../README.md) | en | 2026-10-05 | 未记录 |
 | [README.zh-CN.md](../README.zh-CN.md) | zh | 2026-10-03 | 未记录 |
-| [PROJECT_STATE.md](PROJECT_STATE.md) | zh | 2026-10-14 | 部分核对；详见文档顶部 |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | zh | 2026-10-14 | 部分核对；详见文档顶部 |
+| [PROJECT_STATE.md](PROJECT_STATE.md) | zh | 2026-10-18 | 部分核对；详见文档顶部 |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | zh | 2026-10-18 | 部分核对；详见文档顶部 |
 | [INTERFACES.md](INTERFACES.md) | zh | 2026-10-14 | 部分核对；详见文档顶部 |
 | [SHARED_CORE.md](SHARED_CORE.md) | zh | 2026-10-06 | 未记录 |
 | [ZCODE_RUNTIME.md](ZCODE_RUNTIME.md) | zh | 2026-10-14 | 2026-10-08，本地配置/假运行时 |
@@ -70,6 +70,7 @@ English readers start at [README.md](../README.md). This index is bilingual; the
 | [ADR-004](decisions/ADR-004-separate-control-state-and-observation.md) | 2026-10-07 | Accepted：分离运行时控制、权威状态与补充观察 |
 | [ADR-005](decisions/ADR-005-long-session-reliability.md) | 2026-10-08 | Accepted：长会话清理、锁释放、报告修复与 provider 兼容 |
 | [ADR-006](decisions/ADR-006-provider-quota-failure-diagnostics.md) | 2026-10-14 | Accepted：安全识别并明确提示 provider 用量额度耗尽 |
+| [ADR-009](decisions/ADR-009-windows-identity-bound-tree-termination.md) | 2026-10-18 | DECISION：Windows 进程树身份绑定归属与终止（含 PR #47 返修语义） |
 | [decisions/roadmap-decisions-2026-09-27.md](decisions/roadmap-decisions-2026-09-27.md) | 2026-09-27 | 路线图与决策讨论 |
 | [decisions/reliability-repair-plan-v2-2026-10-03.md](decisions/reliability-repair-plan-v2-2026-10-03.md) | 2026-10-03 | 可靠性修复计划，含未完成项 |
 
@@ -100,6 +101,8 @@ English readers start at [README.md](../README.md). This index is bilingual; the
 |---|---|
 | [reports/task-feedback-v0-1-implementation-2026-10-06.md](reports/task-feedback-v0-1-implementation-2026-10-06.md) | Task Feedback v0.1 的交付报告，一次性材料 |
 | [reports/2026-10-08-long-session-reliability.md](reports/2026-10-08-long-session-reliability.md) | 长会话故障证据、本地修复、验证与未运行边界 |
+| [reports/2026-10-17-filesystem-root-guards.md](reports/2026-10-17-filesystem-root-guards.md) | Windows 锁时序重试、teardown 容错与文件系统根守卫的证据、修复与边界 |
+| [reports/2026-10-18-pr47-claimant-repair.md](reports/2026-10-18-pr47-claimant-repair.md) | PR #47 claimant 扫描 P1 返修、逐边持有证明、hold 校验与预算语义的证据与边界 |
 
 ### 自动生成 Generated
 

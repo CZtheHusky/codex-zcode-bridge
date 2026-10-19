@@ -659,9 +659,6 @@ function errorText(error62) {
   return message.length > 300 ? `${message.slice(0, 300)}\u2026` : message;
 }
 
-// src/adapters/process-spawn.ts
-import { spawn as spawn2 } from "node:child_process";
-
 // src/runtime/process-probe.ts
 import { readFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
@@ -875,91 +872,775 @@ function createPlatformProbe(options = {}) {
 }
 
 // src/adapters/windows-process-cleanup.ts
-import { performance } from "node:perf_hooks";
-async function terminateWindowsProcessTree(pid, killWaitMs, dependencies) {
-  const requests = await dependencies.capture(pid);
-  if (!requests.some((request) => request.pid === pid)) throw new Error("process_tree_snapshot_invalid: root missing");
-  const inspect = async () => {
-    const verdicts = await dependencies.probe(requests);
-    if (verdicts.length !== requests.length || verdicts.some((verdict2) => verdict2.state === "unknown")) {
-      throw new Error("process_tree_probe_unverified: recorded executor exit is unknown");
-    }
-    return verdicts;
+import { spawn as spawn2 } from "node:child_process";
+var CIM_REPRESENTATION_INTERVAL_TICKS = 10n;
+function withinCimInterval(exactFileTime, cimFileTime) {
+  const exact = BigInt(exactFileTime);
+  const cim = BigInt(cimFileTime);
+  return exact >= cim && exact <= cim + CIM_REPRESENTATION_INTERVAL_TICKS;
+}
+function cimIntervalWithin(cimFileTime, lowExact, highExact) {
+  const cim = BigInt(cimFileTime);
+  return cim >= BigInt(lowExact) && cim + CIM_REPRESENTATION_INTERVAL_TICKS <= BigInt(highExact);
+}
+function cimClearlyBefore(cimFileTime, exactFileTime) {
+  return BigInt(cimFileTime) + CIM_REPRESENTATION_INTERVAL_TICKS < BigInt(exactFileTime);
+}
+function cimClearlyAfter(cimFileTime, exactFileTime) {
+  return BigInt(cimFileTime) > BigInt(exactFileTime);
+}
+function acceptMember(row, input2, held, members2, memberPids, decidedIrrelevant, holdRequired, refuse) {
+  if (row.startTicks === null || row.creationFileTime === null) {
+    refuse("process_tree_member_identity_unknown", row.pid);
+    return;
+  }
+  const child = held.get(row.pid);
+  if (!child) {
+    holdRequired.add(row.pid);
+    return;
+  }
+  if (!withinCimInterval(child.creationFileTime, row.creationFileTime)) {
+    refuse("process_tree_generation_mismatch", row.pid);
+    return;
+  }
+  if (child.creationTicks !== row.startTicks) {
+    refuse("process_tree_member_generation_mismatch", row.pid);
+    return;
+  }
+  memberPids.add(row.pid);
+  members2.push({ pid: row.pid, parentPid: row.parentPid, creationFileTime: row.creationFileTime, startTicks: row.startTicks });
+}
+function resolveWindowsTreeMembership(input2) {
+  const rowsByPid = /* @__PURE__ */ new Map();
+  for (const row of input2.rows) {
+    if (rowsByPid.has(row.pid)) return { kind: "refuse", code: "process_tree_snapshot_invalid", pid: row.pid };
+    rowsByPid.set(row.pid, row);
+  }
+  const members2 = [];
+  const memberPids = /* @__PURE__ */ new Set();
+  const decidedIrrelevant = /* @__PURE__ */ new Set();
+  const holdRequired = /* @__PURE__ */ new Set();
+  const state = { refusal: null };
+  const refuse = (code, pid) => {
+    if (!state.refusal) state.refusal = { code, pid };
   };
-  const before = await inspect();
-  if (before.every((verdict2) => verdict2.state === "exited")) return;
-  const rootIndex = requests.findIndex((request) => request.pid === pid);
-  if (before[rootIndex]?.state !== "alive") {
-    throw new Error("process_tree_descendants_alive: root exited before termination");
-  }
-  let exitCode = null;
-  let commandFailed = false;
-  try {
-    exitCode = await dependencies.kill(pid);
-  } catch {
-    commandFailed = true;
-  }
-  const deadline = performance.now() + Math.max(0, killWaitMs);
-  for (; ; ) {
-    const after = await inspect();
-    if (after.every((verdict2) => verdict2.state === "exited")) return;
-    if (performance.now() >= deadline) {
-      const reason = commandFailed ? "command_error" : exitCode === null ? "timeout" : `exit_${exitCode}`;
-      throw new Error(`process_tree_cleanup_unverified: taskkill ${reason}; recorded executors remain alive`);
+  const rootRow = rowsByPid.get(input2.rootPid);
+  if (rootRow) {
+    if (input2.expectedRootTicks === null) {
+      return { kind: "refuse", code: "process_tree_root_identity_required", pid: input2.rootPid };
     }
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    if (rootRow.startTicks === null || rootRow.creationFileTime === null) {
+      return { kind: "refuse", code: "process_tree_root_identity_unknown", pid: input2.rootPid };
+    }
+    if (rootRow.startTicks !== input2.expectedRootTicks) {
+      return { kind: "refuse", code: "process_tree_root_identity_changed", pid: input2.rootPid };
+    }
+    const heldRoot = input2.held.get(input2.rootPid);
+    if (!heldRoot) {
+      holdRequired.add(input2.rootPid);
+    } else if (heldRoot.creationTicks !== rootRow.startTicks || !withinCimInterval(heldRoot.creationFileTime, rootRow.creationFileTime)) {
+      return { kind: "refuse", code: "process_tree_root_generation_mismatch", pid: input2.rootPid };
+    } else {
+      memberPids.add(rootRow.pid);
+      members2.push({ pid: rootRow.pid, parentPid: rootRow.parentPid, creationFileTime: rootRow.creationFileTime, startTicks: rootRow.startTicks });
+    }
+  } else if (!input2.killed.has(input2.rootPid)) {
+    if (input2.expectedRootTicks === null) {
+      return { kind: "refuse", code: "process_tree_root_identity_required", pid: input2.rootPid };
+    }
+    return { kind: "refuse", code: "process_tree_root_exited", pid: input2.rootPid };
+  }
+  for (let changed = true; changed && !state.refusal; ) {
+    changed = false;
+    for (const row of input2.rows) {
+      if (state.refusal) break;
+      if (memberPids.has(row.pid) || decidedIrrelevant.has(row.pid)) continue;
+      const parentPid = row.parentPid;
+      if (parentPid === row.pid) {
+        decidedIrrelevant.add(row.pid);
+        changed = true;
+        continue;
+      }
+      const parentRow = memberPids.has(parentPid) ? rowsByPid.get(parentPid) : void 0;
+      if (parentRow) {
+        if (row.creationFileTime === null) {
+          refuse("process_tree_row_creation_unknown", row.pid);
+          continue;
+        }
+        if (parentRow.creationFileTime === null) {
+          refuse("process_tree_row_creation_unknown", parentPid);
+          continue;
+        }
+        const parent = input2.held.get(parentPid);
+        if (!parent) {
+          holdRequired.add(parentPid);
+          continue;
+        }
+        if (cimClearlyBefore(row.creationFileTime, parent.creationFileTime)) {
+          decidedIrrelevant.add(row.pid);
+          changed = true;
+          continue;
+        }
+        const child = input2.held.get(row.pid);
+        if (!child) {
+          holdRequired.add(row.pid);
+          continue;
+        }
+        if (!withinCimInterval(child.creationFileTime, row.creationFileTime) || !withinCimInterval(parent.creationFileTime, parentRow.creationFileTime)) {
+          refuse("process_tree_generation_mismatch", row.pid);
+          continue;
+        }
+        const childCreation = BigInt(child.creationFileTime);
+        const parentCreation = BigInt(parent.creationFileTime);
+        if (childCreation === parentCreation) {
+          refuse("process_tree_edge_indistinguishable", row.pid);
+          continue;
+        }
+        if (childCreation < parentCreation) {
+          decidedIrrelevant.add(row.pid);
+          changed = true;
+          continue;
+        }
+        acceptMember(row, input2, input2.held, members2, memberPids, decidedIrrelevant, holdRequired, refuse);
+        if (memberPids.has(row.pid)) changed = true;
+        continue;
+      }
+      const killedParent = input2.killed.get(parentPid);
+      if (killedParent) {
+        if (row.creationFileTime === null) {
+          refuse("process_tree_row_creation_unknown", row.pid);
+          continue;
+        }
+        if (cimClearlyBefore(row.creationFileTime, killedParent.creationFileTime)) {
+          decidedIrrelevant.add(row.pid);
+          changed = true;
+          continue;
+        }
+        if (killedParent.exitFileTime === null) {
+          refuse("process_tree_parent_exit_unconfirmed", parentPid);
+          continue;
+        }
+        if (cimClearlyAfter(row.creationFileTime, killedParent.exitFileTime)) {
+          decidedIrrelevant.add(row.pid);
+          changed = true;
+          continue;
+        }
+        if (cimIntervalWithin(row.creationFileTime, killedParent.creationFileTime, killedParent.exitFileTime)) {
+          acceptMember(row, input2, input2.held, members2, memberPids, decidedIrrelevant, holdRequired, refuse);
+          if (memberPids.has(row.pid)) changed = true;
+          continue;
+        }
+        const child = input2.held.get(row.pid);
+        if (!child) {
+          holdRequired.add(row.pid);
+          continue;
+        }
+        if (!withinCimInterval(child.creationFileTime, row.creationFileTime)) {
+          refuse("process_tree_generation_mismatch", row.pid);
+          continue;
+        }
+        const creation = BigInt(child.creationFileTime);
+        if (creation >= BigInt(killedParent.creationFileTime) && creation <= BigInt(killedParent.exitFileTime)) {
+          acceptMember(row, input2, input2.held, members2, memberPids, decidedIrrelevant, holdRequired, refuse);
+          if (memberPids.has(row.pid)) changed = true;
+        } else {
+          decidedIrrelevant.add(row.pid);
+          changed = true;
+        }
+        continue;
+      }
+      if (input2.naturalGonePids.has(parentPid)) {
+        if (row.creationFileTime === null) {
+          refuse("process_tree_row_creation_unknown", row.pid);
+          continue;
+        }
+        const lastCim = input2.naturalGoneCreation.get(parentPid) ?? null;
+        if (lastCim !== null && cimClearlyBefore(row.creationFileTime, lastCim)) {
+          decidedIrrelevant.add(row.pid);
+          changed = true;
+          continue;
+        }
+        refuse("process_tree_parent_unprovable", parentPid);
+        continue;
+      }
+      const parentUndecidedLiveRow = rowsByPid.has(parentPid) && !memberPids.has(parentPid) && !decidedIrrelevant.has(parentPid);
+      if (parentUndecidedLiveRow || parentPid === input2.rootPid) continue;
+      decidedIrrelevant.add(row.pid);
+      changed = true;
+    }
+  }
+  if (state.refusal) return { kind: "refuse", code: state.refusal.code, pid: state.refusal.pid };
+  if (holdRequired.size > 0) return { kind: "members", members: members2, holdRequired: [...holdRequired] };
+  if (members2.length === 0) return { kind: "success" };
+  return { kind: "members", members: members2, holdRequired: [] };
+}
+var WindowsTreeCleanupError = class extends Error {
+  code;
+  memberPids;
+  constructor(code, message, memberPids = []) {
+    super(message);
+    this.name = "WindowsTreeCleanupError";
+    this.code = code;
+    this.memberPids = memberPids;
+  }
+};
+async function terminateWindowsProcessTree(pid, expectedRootTicks, killWaitMs, dependencies) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    throw new WindowsTreeCleanupError("process_tree_invalid_pid", `a positive integer PID is required, got: ${String(pid)}`);
+  }
+  const now = dependencies.now ?? Date.now;
+  const sleep3 = dependencies.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const transaction = await dependencies.open();
+  const killed = /* @__PURE__ */ new Map();
+  const held = /* @__PURE__ */ new Map();
+  const naturalGone = /* @__PURE__ */ new Set();
+  const naturalGoneCreation = /* @__PURE__ */ new Map();
+  const memberReceipts = /* @__PURE__ */ new Map();
+  const killReceipts = [];
+  const unverifiedCandidates = /* @__PURE__ */ new Set();
+  let rounds = 0;
+  let bodyError = null;
+  let succeeded = false;
+  const knownPids = () => [.../* @__PURE__ */ new Set([...memberReceipts.keys(), ...unverifiedCandidates])];
+  try {
+    const deadline = now() + Math.max(0, killWaitMs);
+    for (; ; ) {
+      rounds += 1;
+      const rows = await transaction.enumerate();
+      const resolution = await resolveRound(rows);
+      if (resolution.kind === "refuse") {
+        throw new WindowsTreeCleanupError(resolution.code, `${resolution.code}: process tree cleanup refused`, knownPids());
+      }
+      if (resolution.kind === "success") break;
+      const members2 = resolution.members.map((m) => ({ pid: m.pid, parentPid: m.parentPid, startTicks: m.startTicks, creationFileTime: m.creationFileTime }));
+      const livePids = new Set(resolution.members.map((m) => m.pid));
+      for (const previous of memberReceipts.keys()) {
+        if (!livePids.has(previous) && !killed.has(previous) && !naturalGone.has(previous)) {
+          naturalGone.add(previous);
+          naturalGoneCreation.set(previous, memberReceipts.get(previous).creationFileTime);
+        }
+      }
+      for (const member of members2) {
+        unverifiedCandidates.delete(member.pid);
+        if (!memberReceipts.has(member.pid)) {
+          memberReceipts.set(member.pid, { pid: member.pid, fingerprint: member.startTicks, creationFileTime: member.creationFileTime });
+        }
+      }
+      const ordered = orderChildrenFirst(members2);
+      const remaining = Math.max(120, deadline - now());
+      const perMemberWait = Math.min(2e3, Math.max(120, Math.floor(remaining / Math.max(1, ordered.length))));
+      for (const member of ordered) {
+        const heldInfo = held.get(member.pid);
+        const kill = await transaction.kill(member.pid, member.startTicks, perMemberWait);
+        killReceipts.push({ pid: member.pid, status: kill.status, exitFileTime: kill.exitFileTime });
+        if (kill.status === "signaled" || kill.status === "already_exited") {
+          killed.set(member.pid, {
+            pid: member.pid,
+            creationFileTime: heldInfo?.creationFileTime ?? member.creationFileTime,
+            exitFileTime: kill.exitFileTime
+          });
+        } else if (kill.status === "identity_changed" || kill.status === "not_held") {
+          naturalGone.add(member.pid);
+          naturalGoneCreation.set(member.pid, member.creationFileTime);
+        }
+      }
+      const unconfirmedMembers = members2.filter((m) => {
+        const record2 = killed.get(m.pid);
+        return record2 === void 0 || record2.exitFileTime === null;
+      });
+      if (now() >= deadline && unconfirmedMembers.length > 0) {
+        throw new WindowsTreeCleanupError(
+          "process_tree_cleanup_unverified",
+          `process_tree_cleanup_unverified: ${String(unconfirmedMembers.length)} recorded member(s) not provably exited`,
+          knownPids()
+        );
+      }
+      await sleep3(20);
+    }
+    succeeded = true;
+    return {
+      rootPid: pid,
+      rounds,
+      members: [...memberReceipts.values()],
+      kills: killReceipts,
+      signaled: killReceipts.filter((k) => k.status === "signaled").map((k) => k.pid)
+    };
+  } catch (error62) {
+    bodyError = error62;
+    if (error62 instanceof WindowsTreeCleanupError) {
+      throw error62.memberPids.length > 0 ? error62 : new WindowsTreeCleanupError(error62.code, error62.message, knownPids());
+    }
+    const detail = error62 instanceof Error ? error62.message : String(error62);
+    throw new WindowsTreeCleanupError("process_tree_transaction_error", `process_tree_transaction_error: ${detail}`, knownPids());
+  } finally {
+    let closeError = null;
+    try {
+      await transaction.close();
+    } catch (error62) {
+      closeError = error62;
+    }
+    if (closeError !== null) {
+      const closeText = closeError instanceof Error ? closeError.message : String(closeError);
+      if (bodyError !== null) {
+        const original = bodyError instanceof WindowsTreeCleanupError ? new WindowsTreeCleanupError(bodyError.code, `${bodyError.message}; process_tree_close_failed: ${closeText}`, bodyError.memberPids.length > 0 ? bodyError.memberPids : knownPids()) : new WindowsTreeCleanupError("process_tree_transaction_error", `process_tree_transaction_error: ${String(bodyError instanceof Error ? bodyError.message : bodyError)}; process_tree_close_failed: ${closeText}`, knownPids());
+        throw original;
+      }
+      throw new WindowsTreeCleanupError("process_tree_close_failed", `process_tree_close_failed: ${closeText}`, knownPids());
+    }
+  }
+  async function resolveRound(rows) {
+    let workingRows = [...rows];
+    const resolve = () => resolveWindowsTreeMembership({
+      rows: workingRows,
+      rootPid: pid,
+      expectedRootTicks,
+      held,
+      killed,
+      naturalGonePids: naturalGone,
+      naturalGoneCreation
+    });
+    let resolution = resolve();
+    for (let attempt = 0; attempt < 6 && resolution.kind === "members" && resolution.holdRequired.length > 0; attempt += 1) {
+      const requested = [...new Set(resolution.holdRequired)];
+      for (const candidate of resolution.holdRequired) unverifiedCandidates.add(candidate);
+      const outcomes = await transaction.hold(requested);
+      if (outcomes.length !== requested.length) {
+        throw new WindowsTreeCleanupError(
+          "process_tree_hold_invalid",
+          `process_tree_hold_invalid: ${String(outcomes.length)} responses for ${String(requested.length)} requested pids`,
+          knownPids()
+        );
+      }
+      const seen = /* @__PURE__ */ new Set();
+      for (const outcome of outcomes) {
+        if (seen.has(outcome.pid)) {
+          throw new WindowsTreeCleanupError("process_tree_hold_invalid", `process_tree_hold_invalid: duplicate response for pid ${String(outcome.pid)}`, knownPids());
+        }
+        seen.add(outcome.pid);
+        if (!requested.includes(outcome.pid)) {
+          throw new WindowsTreeCleanupError("process_tree_hold_invalid", `process_tree_hold_invalid: unexpected pid ${String(outcome.pid)} in hold response`, knownPids());
+        }
+        if (outcome.status === "ok") {
+          held.set(outcome.pid, { pid: outcome.pid, creationFileTime: outcome.creationFileTime, creationTicks: outcome.creationTicks });
+        } else if (outcome.status === "absent") {
+          throw new WindowsTreeCleanupError(
+            "process_tree_candidate_absent",
+            `process_tree_candidate_absent: candidate pid ${String(outcome.pid)} vanished between enumeration and hold; its subtree cannot be attributed`,
+            [.../* @__PURE__ */ new Set([...requested, ...knownPids()])]
+          );
+        }
+      }
+      resolution = resolve();
+    }
+    if (resolution.kind === "members" && resolution.holdRequired.length > 0) {
+      for (const candidate of resolution.holdRequired) unverifiedCandidates.add(candidate);
+      const roundMemberPids = resolution.members.map((m) => m.pid);
+      throw new WindowsTreeCleanupError(
+        "process_tree_hold_unresolved",
+        `process_tree_hold_unresolved: cannot prove identity/ownership for pids ${resolution.holdRequired.join(",")}`,
+        [.../* @__PURE__ */ new Set([...roundMemberPids, ...knownPids()])]
+      );
+    }
+    return resolution;
   }
 }
-function windowsTreeCaptureScript(pid) {
+function orderChildrenFirst(members2) {
+  const remaining = [...members2];
+  const ordered = [];
+  let progress = true;
+  while (remaining.length > 0 && progress) {
+    progress = false;
+    for (let index = remaining.length - 1; index >= 0; index -= 1) {
+      const member = remaining[index];
+      const hasPendingChild = remaining.some((other) => other !== member && other.parentPid === member.pid);
+      if (!hasPendingChild) {
+        ordered.push(member);
+        remaining.splice(index, 1);
+        progress = true;
+      }
+    }
+  }
+  const leftovers = remaining.sort((a, b) => BigInt(a.creationFileTime) > BigInt(b.creationFileTime) ? -1 : 1);
+  return [...ordered, ...leftovers];
+}
+function windowsTreeTransactionScript() {
   return [
     "$ErrorActionPreference = 'Stop'",
-    "$all = @(Get-CimInstance Win32_Process -ErrorAction Stop)",
-    `$selected = [System.Collections.Generic.HashSet[int]]::new(); [void]$selected.Add(${pid})`,
-    "do { $changed = $false; foreach ($item in $all) { if ($selected.Contains([int]$item.ParentProcessId)) { if ($selected.Add([int]$item.ProcessId)) { $changed = $true } } } } while ($changed)",
-    "'bridge_tree_snapshot_v1'",
-    "foreach ($candidate in $selected) { $item = Get-Process -Id $candidate -ErrorAction SilentlyContinue; if ($null -eq $item) { '{0}|absent' -f $candidate } else { '{0}|{1}' -f $candidate, $item.StartTime.Ticks } }"
-  ].join("; ");
+    "$ProgressPreference = 'SilentlyContinue'",
+    "Add-Type -TypeDefinition @'",
+    "using System;",
+    "using System.Collections.Generic;",
+    "using System.Runtime.InteropServices;",
+    "public static class BridgeTreeTx {",
+    '  [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr OpenProcess(uint access, bool inherit, int pid);',
+    '  [DllImport("kernel32.dll", SetLastError = true)] static extern bool GetProcessTimes(IntPtr h, out long created, out long exited, out long kernel, out long user);',
+    '  [DllImport("kernel32.dll", SetLastError = true)] static extern bool TerminateProcess(IntPtr h, uint exitCode);',
+    '  [DllImport("kernel32.dll", SetLastError = true)] static extern uint WaitForSingleObject(IntPtr h, uint milliseconds);',
+    '  [DllImport("kernel32.dll", SetLastError = true)] static extern bool CloseHandle(IntPtr h);',
+    "  public static readonly Dictionary<int, IntPtr> Held = new Dictionary<int, IntPtr>();",
+    "  public static string Hold(int pid) {",
+    "    IntPtr existing;",
+    '    if (Held.TryGetValue(pid, out existing) && existing != IntPtr.Zero) { return "already_held|"; }',
+    "    IntPtr h = OpenProcess(0x00101001u, false, pid);",
+    '    if (h == IntPtr.Zero) { int err = Marshal.GetLastWin32Error(); return (err == 87 ? "absent|" : (err == 5 ? "denied|" : "error|")) + err.ToString(); }',
+    "    long c, e, k, u;",
+    '    if (!GetProcessTimes(h, out c, out e, out k, out u)) { int err = Marshal.GetLastWin32Error(); CloseHandle(h); return "error|" + err.ToString(); }',
+    "    Held[pid] = h;",
+    '    return "ok|" + c.ToString() + "|" + DateTime.FromFileTime(c).Ticks.ToString();',
+    "  }",
+    "  public static string Kill(int pid, string expectTicks, int waitMs) {",
+    "    IntPtr h;",
+    '    if (!Held.TryGetValue(pid, out h) || h == IntPtr.Zero) { return "not_held|"; }',
+    "    long c, e, k, u;",
+    '    if (!GetProcessTimes(h, out c, out e, out k, out u)) { return "error|" + Marshal.GetLastWin32Error().ToString(); }',
+    "    string current = DateTime.FromFileTime(c).Ticks.ToString();",
+    '    if (current != expectTicks) { return "identity_changed|" + current; }',
+    '    if (e != 0) { return "already_exited|" + e.ToString(); }',
+    '    if (!TerminateProcess(h, 1)) { return "error|" + Marshal.GetLastWin32Error().ToString(); }',
+    "    uint wait = WaitForSingleObject(h, (uint)waitMs);",
+    '    if (!GetProcessTimes(h, out c, out e, out k, out u)) { return "error|" + Marshal.GetLastWin32Error().ToString(); }',
+    '    if (wait != 0) { return "wait_timeout|" + e.ToString(); }',
+    '    return "signaled|" + e.ToString();',
+    "  }",
+    "  public static string CloseAll() {",
+    "    int closed = 0;",
+    "    int failed = 0;",
+    "    foreach (KeyValuePair<int, IntPtr> entry in Held) { if (entry.Value != IntPtr.Zero) { if (CloseHandle(entry.Value)) { closed++; } else { failed++; } } }",
+    "    Held.Clear();",
+    '    return closed.ToString() + "|" + failed.ToString();',
+    "  }",
+    "}",
+    "'@",
+    "[Console]::Out.WriteLine('READY'); [Console]::Out.Flush()",
+    "while ($true) {",
+    "  $line = [Console]::In.ReadLine()",
+    "  if ($null -eq $line) { [void][BridgeTreeTx]::CloseAll(); exit 0 }",
+    "  $parts = $line.Trim().Split(' ')",
+    "  if ($parts[0] -eq 'enum') {",
+    "    $all = @(Get-CimInstance Win32_Process -ErrorAction Stop)",
+    "    [Console]::Out.WriteLine('ENUM_BEGIN')",
+    "    $ids = @(); foreach ($p in $all) { $ids += [int]$p.ProcessId }",
+    "    $byId = @{}",
+    "    if ($ids.Count -gt 0) { foreach ($g in (Get-Process -Id $ids -ErrorAction SilentlyContinue)) { $byId[[int]$g.Id] = $g } }",
+    "    foreach ($p in $all) {",
+    "      $ticks = 'unknown'",
+    "      $cim = 'unknown'",
+    "      if ($null -ne $p.CreationDate) { $cim = [string]$p.CreationDate.ToFileTimeUtc() }",
+    "      $g = $byId[[int]$p.ProcessId]",
+    "      if ($null -ne $g) { try { $st = $g.StartTime; if ($null -ne $st) { $ticks = [string]$st.Ticks } } catch { $ticks = 'unknown' } }",
+    "      if ([string]::IsNullOrEmpty($ticks)) { $ticks = 'unknown' }",
+    "      [Console]::Out.WriteLine(('R {0} {1} {2} {3}' -f [int]$p.ProcessId, [int]$p.ParentProcessId, $cim, $ticks))",
+    "    }",
+    "    [Console]::Out.WriteLine('ENUM_END'); [Console]::Out.Flush()",
+    "  } elseif ($parts[0] -eq 'hold') {",
+    "    for ($i = 1; $i -lt $parts.Count; $i++) {",
+    "      $hp = 0",
+    "      if (-not [int]::TryParse($parts[$i], [ref]$hp)) { [Console]::Out.WriteLine('H 0 error 22'); continue }",
+    "      $r = [BridgeTreeTx]::Hold($hp).Split('|')",
+    "      if ($r[0] -eq 'already_held') { [Console]::Out.WriteLine(('H {0} held' -f $hp)) }",
+    "      elseif ($r[0] -eq 'ok') { [Console]::Out.WriteLine(('H {0} ok {1} {2}' -f $hp, $r[1], $r[2])) }",
+    "      else { [Console]::Out.WriteLine(('H {0} {1} {2}' -f $hp, $r[0], $r[1])) }",
+    "    }",
+    "    [Console]::Out.WriteLine('HOLD_END'); [Console]::Out.Flush()",
+    "  } elseif ($parts[0] -eq 'kill') {",
+    "    $kpid = [int]$parts[1]; $kticks = [string]$parts[2]; $kwait = [int]$parts[3]",
+    "    $r = [BridgeTreeTx]::Kill($kpid, $kticks, $kwait).Split('|')",
+    "    if ($r[0] -eq 'signaled' -or $r[0] -eq 'already_exited') { [Console]::Out.WriteLine(('K {0} {1} {2}' -f $kpid, $r[0], $r[1])) }",
+    "    elseif ($r[0] -eq 'identity_changed') { [Console]::Out.WriteLine(('K {0} identity_changed 0' -f $kpid)) }",
+    "    elseif ($r[0] -eq 'wait_timeout') { [Console]::Out.WriteLine(('K {0} wait_timeout {1}' -f $kpid, $r[1])) }",
+    "    elseif ($r[0] -eq 'not_held') { [Console]::Out.WriteLine(('K {0} not_held 0' -f $kpid)) }",
+    "    else { [Console]::Out.WriteLine(('K {0} error {1}' -f $kpid, $r[1])) }",
+    "    [Console]::Out.WriteLine('KILL_END'); [Console]::Out.Flush()",
+    "  } elseif ($parts[0] -eq 'close') {",
+    "    $r = [BridgeTreeTx]::CloseAll().Split('|')",
+    "    [Console]::Out.WriteLine(('CLOSED {0} {1}' -f $r[0], $r[1])); [Console]::Out.Flush()",
+    "    exit 0",
+    "  } else {",
+    "    [Console]::Out.WriteLine('FATAL unknown_command'); [Console]::Out.Flush(); exit 1",
+    "  }",
+    "}"
+  ].join("\n");
 }
-function parseWindowsTreeCapture(stdout, pid) {
-  const lines = stdout.trim().split(/\r?\n/u);
-  if (lines.shift() !== "bridge_tree_snapshot_v1") throw new Error("process_tree_snapshot_invalid: protocol missing");
-  const capturedAt = (/* @__PURE__ */ new Date()).toISOString();
-  const requests = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const line of lines) {
-    const match = /^(\d+)\|(\d+|absent)$/u.exec(line.trim());
-    const candidate = Number(match?.[1]);
-    if (!match || !Number.isSafeInteger(candidate) || candidate <= 0 || seen.has(candidate)) {
-      throw new Error("process_tree_snapshot_invalid: malformed identity");
-    }
-    seen.add(candidate);
-    requests.push({ pid: candidate, identity: match[2] === "absent" ? null : {
-      pid: candidate,
-      fingerprint: match[2],
-      fingerprint_precision: "exact",
-      identity_version: 1,
-      platform: "win32",
-      captured_at: capturedAt
-    } });
+var TRANSPORT_MAX_LINE_BYTES = 1048576;
+var TRANSPORT_MAX_BUFFERED_BYTES = 8388608;
+var TRANSPORT_MAX_BUFFERED_LINES = 65536;
+var TRANSPORT_MAX_ENUM_ROWS = 4096;
+var TRANSPORT_TOTAL_SESSION_MS_DEFAULT = 12e4;
+var PowerShellTreeTransaction = class _PowerShellTreeTransaction {
+  #child;
+  #bounds;
+  #lines = [];
+  #waiters = [];
+  #exitWaiters = [];
+  #closed = false;
+  #bufferedBytes = 0;
+  #sessionDeadline;
+  #exitCode = null;
+  #exitSignal = null;
+  /** True once the helper's own exit is expected (receipt processed or
+   * fallback initiated); its close event is then not a transport failure. */
+  #closeHandled = false;
+  #failure = null;
+  /** Test seam: attach to an externally spawned/controlled child so the
+   * bounded-stream behaviours are testable with fake streams (no OS). */
+  static attach(child, bounds = {}) {
+    return new _PowerShellTreeTransaction(child, bounds);
   }
-  if (!seen.has(pid)) throw new Error("process_tree_snapshot_invalid: root missing");
-  return requests;
+  constructor(child, bounds = {}) {
+    this.#child = child;
+    this.#bounds = {
+      maxLineBytes: bounds.maxLineBytes ?? TRANSPORT_MAX_LINE_BYTES,
+      maxBufferedBytes: bounds.maxBufferedBytes ?? TRANSPORT_MAX_BUFFERED_BYTES,
+      maxBufferedLines: bounds.maxBufferedLines ?? TRANSPORT_MAX_BUFFERED_LINES,
+      maxEnumRows: bounds.maxEnumRows ?? TRANSPORT_MAX_ENUM_ROWS,
+      totalSessionMs: bounds.totalSessionMs ?? TRANSPORT_TOTAL_SESSION_MS_DEFAULT
+    };
+    this.#sessionDeadline = Date.now() + this.#bounds.totalSessionMs;
+    child.stdout.setEncoding("utf8");
+    let buffer = "";
+    child.stdout.on("data", (chunk) => {
+      if (this.#failure) {
+        buffer = "";
+        return;
+      }
+      buffer += chunk;
+      let newline = buffer.indexOf("\n");
+      while (newline >= 0) {
+        const line = buffer.slice(0, newline).replace(/\r$/u, "");
+        buffer = buffer.slice(newline + 1);
+        const lineBytes = Buffer.byteLength(line, "utf8");
+        if (lineBytes > this.#bounds.maxLineBytes) {
+          this.#failAndDrain();
+          this.#fail(new Error(`process_tree_transport_overflow: line of ${String(lineBytes)} bytes exceeds ${String(this.#bounds.maxLineBytes)}`));
+          return;
+        }
+        this.#bufferedBytes += lineBytes;
+        if (this.#bufferedBytes > this.#bounds.maxBufferedBytes || this.#lines.length >= this.#bounds.maxBufferedLines) {
+          this.#failAndDrain();
+          this.#fail(new Error(`process_tree_transport_overflow: buffered stream exceeded its byte or line budget (${String(this.#bufferedBytes)} bytes, ${String(this.#lines.length)} lines)`));
+          return;
+        }
+        const waiter = this.#waiters.shift();
+        if (waiter) {
+          clearTimeout(waiter.timer);
+          waiter.resolve(line);
+          this.#bufferedBytes -= lineBytes;
+        } else {
+          this.#lines.push(line);
+        }
+        newline = buffer.indexOf("\n");
+      }
+      if (Buffer.byteLength(buffer, "utf8") > this.#bounds.maxLineBytes) {
+        this.#failAndDrain();
+        this.#fail(new Error(`process_tree_transport_overflow: unterminated line exceeds ${String(this.#bounds.maxLineBytes)} bytes`));
+      }
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => {
+      void chunk;
+      this.#fail(new Error("process_tree_transport_stderr"));
+    });
+    child.on("error", (error62) => this.#fail(new Error(`process_tree_transport_error: ${String(error62.message)}`)));
+    child.on("close", (code, signal) => {
+      this.#closed = true;
+      this.#exitCode = code;
+      this.#exitSignal = signal;
+      if (!this.#closeHandled) this.#fail(new Error("process_tree_transport_closed"));
+      for (const waiter of this.#exitWaiters.splice(0)) waiter();
+    });
+  }
+  /** Clears buffered receive state; used when a budget trips so a failed
+   * transport neither accumulates nor serves stale lines afterwards. */
+  #failAndDrain() {
+    for (const line of this.#lines) this.#bufferedBytes -= Buffer.byteLength(line, "utf8");
+    this.#lines = [];
+  }
+  #fail(error62) {
+    if (this.#failure) return;
+    this.#failure = error62;
+    for (const waiter of this.#waiters.splice(0)) {
+      clearTimeout(waiter.timer);
+      waiter.reject(error62);
+    }
+  }
+  #nextLine(timeoutMs, what) {
+    if (this.#failure) return Promise.reject(this.#failure);
+    const remainingSession = this.#sessionDeadline - Date.now();
+    if (remainingSession <= 0) {
+      const error62 = new Error(`process_tree_transport_session_timeout: ${what}`);
+      this.#failAndDrain();
+      this.#fail(error62);
+      return Promise.reject(error62);
+    }
+    const buffered = this.#lines.shift();
+    if (buffered !== void 0) {
+      this.#bufferedBytes -= Buffer.byteLength(buffered, "utf8");
+      return Promise.resolve(buffered);
+    }
+    if (this.#closed) return Promise.reject(new Error("process_tree_transport_closed"));
+    const boundedTimeout = Math.min(timeoutMs, remainingSession);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const index = this.#waiters.findIndex((w) => w.resolve === resolve);
+        if (index >= 0) this.#waiters.splice(index, 1);
+        const reason = remainingSession < timeoutMs ? "process_tree_transport_session_timeout" : "process_tree_transport_timeout";
+        reject(new Error(`${reason}: ${what}`));
+        this.#fail(new Error(`${reason}: ${what}`));
+      }, boundedTimeout);
+      if (typeof timer.unref === "function") timer.unref();
+      this.#waiters.push({ resolve, reject, timer });
+    });
+  }
+  static async start(timeoutMs = 2e4) {
+    const encoded = Buffer.from(windowsTreeTransactionScript(), "utf16le").toString("base64");
+    const child = spawn2("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded], {
+      shell: false,
+      windowsHide: true,
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    const transaction = _PowerShellTreeTransaction.attach(child);
+    try {
+      const ready = await transaction.#nextLine(timeoutMs, "helper startup");
+      if (ready !== "READY") throw new Error("process_tree_transport_protocol: startup marker missing");
+      return transaction;
+    } catch (error62) {
+      transaction.#closeHandled = true;
+      try {
+        child.kill("SIGKILL");
+      } catch {
+      }
+      const exited = await transaction.#waitForExit(3e3);
+      if (!exited) {
+        throw new Error(`${error62 instanceof Error ? error62.message : String(error62)}; process_tree_close_failed: startup helper did not exit within bounds`);
+      }
+      throw error62;
+    }
+  }
+  async enumerate() {
+    this.#child.stdin.write("enum\n");
+    const begin = await this.#nextLine(2e4, "enum begin");
+    if (begin !== "ENUM_BEGIN") throw new Error("process_tree_snapshot_invalid: protocol missing");
+    const rows = [];
+    for (; ; ) {
+      const line = await this.#nextLine(2e4, "enum row");
+      if (line === "ENUM_END") break;
+      const match = /^R (\d{1,12}) (\d{1,12}) (\d{1,25}|unknown) (\d{1,25}|unknown)$/u.exec(line);
+      if (!match) throw new Error("process_tree_snapshot_invalid: malformed identity");
+      const pid = Number(match[1]);
+      const parentPid = Number(match[2]);
+      if (!Number.isSafeInteger(pid) || pid <= 0 || !Number.isSafeInteger(parentPid) || parentPid < 0) continue;
+      if (rows.length >= this.#bounds.maxEnumRows) {
+        throw new Error(`process_tree_snapshot_invalid: enumeration exceeded ${String(this.#bounds.maxEnumRows)} rows`);
+      }
+      rows.push({ pid, parentPid, creationFileTime: match[3] === "unknown" ? null : match[3], startTicks: match[4] === "unknown" ? null : match[4] });
+    }
+    return rows;
+  }
+  async hold(pids) {
+    if (pids.length === 0) return [];
+    this.#child.stdin.write(`hold ${pids.join(" ")}
+`);
+    const outcomes = [];
+    for (; ; ) {
+      const line = await this.#nextLine(2e4, "hold response");
+      if (line === "HOLD_END") break;
+      const match = /^H (\d{1,12}) (ok (\d{1,25}) (\d{1,25})|held|absent (\d{1,6})|denied (\d{1,6})|error (\d{1,6}))$/u.exec(line);
+      if (!match) throw new Error("process_tree_hold_invalid: malformed response");
+      const pid = Number(match[1]);
+      if (match[2].startsWith("ok")) {
+        outcomes.push({ pid, status: "ok", creationFileTime: match[3], creationTicks: match[4] });
+      } else if (match[2] === "held") {
+        outcomes.push({ pid, status: "error", detail: "already_held" });
+      } else if (match[2].startsWith("absent")) {
+        outcomes.push({ pid, status: "absent", error: Number(match[5] ?? 0) });
+      } else if (match[2].startsWith("denied")) {
+        outcomes.push({ pid, status: "denied", error: Number(match[6] ?? 0) });
+      } else {
+        outcomes.push({ pid, status: "error", error: Number(match[7] ?? 0) });
+      }
+    }
+    return outcomes;
+  }
+  async kill(pid, expectedTicks, waitMs) {
+    this.#child.stdin.write(`kill ${String(pid)} ${expectedTicks} ${String(Math.max(0, Math.floor(waitMs)))}
+`);
+    const line = await this.#nextLine(waitMs + 25e3, "kill response");
+    const end = await this.#nextLine(5e3, "kill terminator");
+    if (end !== "KILL_END") throw new Error("process_tree_kill_invalid: terminator missing");
+    const match = /^K (\d{1,12}) (signaled|identity_changed|not_held|wait_timeout|already_exited|error) (\d{1,25})$/u.exec(line);
+    if (!match || Number(match[1]) !== pid) throw new Error("process_tree_kill_invalid: malformed response");
+    const status = match[2];
+    const value = match[3];
+    return {
+      status,
+      exitFileTime: status === "signaled" || status === "already_exited" || status === "wait_timeout" ? value === "0" ? null : value : null,
+      detail: status === "identity_changed" ? value : void 0
+    };
+  }
+  async close() {
+    let failure2 = this.#failure;
+    if (!failure2 && !this.#closed) {
+      try {
+        this.#child.stdin.write("close\n");
+        const ack = await this.#nextLine(1e4, "close acknowledgement");
+        const match = /^CLOSED (\d{1,9}) (\d{1,9})$/u.exec(ack);
+        if (!match) throw new Error(`process_tree_close_invalid: unexpected close receipt ${JSON.stringify(ack.slice(0, 60))}`);
+        const failedHandles = Number(match[2]);
+        if (failedHandles > 0) throw new Error(`process_tree_close_failed: ${String(failedHandles)} CloseHandle call(s) failed`);
+        this.#closeHandled = true;
+      } catch (error62) {
+        failure2 = error62 instanceof Error ? error62 : new Error(String(error62));
+        this.#closeHandled = true;
+      }
+    }
+    const exited = await this.#waitForExit(5e3);
+    if (!exited) {
+      this.#closeHandled = true;
+      try {
+        this.#child.kill("SIGKILL");
+      } catch {
+      }
+      try {
+        this.#child.stdin.end();
+      } catch {
+      }
+      const exitedAfterKill = await this.#waitForExit(3e3);
+      if (!exitedAfterKill) {
+        throw new Error(failure2 ? `${failure2.message}; process_tree_close_failed: helper did not exit within bounds` : "process_tree_close_failed: helper did not exit within bounds");
+      }
+      throw new Error(failure2 ? `${failure2.message}; process_tree_close_forced: helper exited only after a forced kill` : "process_tree_close_forced: helper exited only after a forced kill");
+    }
+    if (this.#exitCode !== 0 || this.#exitSignal !== null) {
+      const abnormal = `process_tree_close_abnormal: helper exited with code ${String(this.#exitCode)}${this.#exitSignal ? `, signal ${this.#exitSignal}` : ""}`;
+      throw new Error(failure2 ? `${failure2.message}; ${abnormal}` : abnormal);
+    }
+    if (failure2) throw failure2;
+    if (this.#failure) throw this.#failure;
+  }
+  #waitForExit(timeoutMs) {
+    if (this.#closed) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        const index = this.#exitWaiters.indexOf(waiter);
+        if (index >= 0) this.#exitWaiters.splice(index, 1);
+        resolve(value);
+      };
+      const waiter = () => finish(true);
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      if (typeof timer.unref === "function") timer.unref();
+      this.#exitWaiters.push(waiter);
+    });
+  }
+};
+async function openPowerShellTreeTransaction() {
+  return PowerShellTreeTransaction.start();
 }
 
 // src/adapters/process-spawn.ts
-function appendBounded(current, chunk, maxBytes) {
-  if (!(maxBytes > 0)) return { value: current.value + chunk, truncated: current.truncated };
-  const remaining = maxBytes - Buffer.byteLength(current.value, "utf8");
-  if (remaining <= 0) return chunk ? { value: current.value, truncated: true } : current;
-  const bytes = Buffer.from(chunk, "utf8");
-  if (bytes.length <= remaining) {
-    return { value: current.value + chunk, truncated: current.truncated };
-  }
-  return {
-    value: current.value + bytes.subarray(0, remaining).toString("utf8"),
-    truncated: true
-  };
-}
 function isProcessRunning(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -976,27 +1657,14 @@ var terminateProcessTree = async (pid, options = {}) => {
     throw new Error(`A positive integer PID is required, got: ${pid}`);
   }
   if (process.platform === "win32") {
-    const probe = createPlatformProbe();
-    await terminateWindowsProcessTree(pid, options.killWaitMs ?? 2e3, {
-      capture: async (root) => {
-        let snapshot;
-        try {
-          snapshot = await runCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", windowsTreeCaptureScript(root)], {
-            timeoutMs: 5e3,
-            maxOutputBytes: 128e3
-          });
-        } catch {
-          throw new Error("process_tree_snapshot_unverified: query failed");
-        }
-        if (snapshot.code !== 0 || snapshot.stdoutTruncated || snapshot.stderr.length > 0) {
-          throw new Error("process_tree_snapshot_unverified: query failed or incomplete");
-        }
-        return parseWindowsTreeCapture(snapshot.stdout, root);
-      },
-      probe: (requests) => probe.probe(requests),
-      kill: async (root) => (await runCommand("taskkill", ["/PID", String(root), "/T", "/F"], { timeoutMs: 15e3 })).code
+    const expected = options.expectedRootFingerprint ?? null;
+    if (expected === null) {
+      throw new Error("process_tree_root_identity_required: Windows process-tree termination requires a caller-bound root identity");
+    }
+    const receipt = await terminateWindowsProcessTree(pid, expected, options.killWaitMs ?? 2e3, {
+      open: openPowerShellTreeTransaction
     });
-    return { pid, signal: "SIGKILL", verified: true };
+    return { pid, signal: "SIGKILL", verified: true, windows: receipt };
   }
   signalProcessTree(pid, "SIGTERM");
   if (await waitForProcessTreeExit(pid, options.graceMs ?? 500)) {
@@ -1008,47 +1676,32 @@ var terminateProcessTree = async (pid, options = {}) => {
   }
   return { pid, signal: "SIGKILL", verified: true };
 };
-function runCommand(command, args, options) {
-  return new Promise((resolve, reject) => {
-    const child = spawn2(command, args, {
-      shell: false,
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-    let stdout = { value: "", truncated: false };
-    let stderr = { value: "", truncated: false };
-    child.stdout?.setEncoding("utf8");
-    child.stderr?.setEncoding("utf8");
-    child.stdout?.on("data", (chunk) => {
-      stdout = appendBounded(stdout, chunk, options.maxOutputBytes ?? 1e6);
-    });
-    child.stderr?.on("data", (chunk) => {
-      stderr = appendBounded(stderr, chunk, options.maxOutputBytes ?? 1e6);
-    });
-    let timedOut = false;
-    const timer = options.timeoutMs && options.timeoutMs > 0 ? setTimeout(() => {
-      timedOut = true;
-      try {
-        child.kill("SIGKILL");
-      } catch {
-      }
-    }, options.timeoutMs) : null;
-    timer?.unref();
-    child.on("error", (error62) => {
-      if (timer) clearTimeout(timer);
-      reject(error62);
-    });
-    child.on("close", (code, signal) => {
-      if (timer) clearTimeout(timer);
-      resolve({
-        code: timedOut ? null : code,
-        signal: timedOut ? "SIGKILL" : signal,
-        stdout: stdout.value,
-        stderr: stderr.value,
-        stdoutTruncated: stdout.truncated
-      });
-    });
-  });
+function childStillOnSpawnGeneration(child) {
+  if (typeof child.pid !== "number" || !Number.isInteger(child.pid) || child.pid <= 0) return false;
+  if (child.exitSeen === true) return false;
+  return child.exitCode === null && child.signalCode === null;
+}
+async function captureSpawnGenerationIdentity(child, probe, options = {}) {
+  const pid = child.pid;
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return null;
+  const read = async () => {
+    let identity;
+    try {
+      identity = await probe.identityOf(pid);
+    } catch {
+      return null;
+    }
+    if (!childStillOnSpawnGeneration(child)) return null;
+    if (typeof identity.fingerprint !== "string" || identity.fingerprint.length === 0) return null;
+    if (identity.fingerprint_precision !== "exact") return null;
+    if (child.pid !== pid) return null;
+    return { pid, fingerprint: identity.fingerprint };
+  };
+  const first = await read();
+  if (first !== null) return first;
+  await new Promise((resolve) => setTimeout(resolve, options.retryDelayMs ?? 250));
+  if (!childStillOnSpawnGeneration(child)) return null;
+  return read();
 }
 function signalProcessTree(pid, signal) {
   try {
@@ -22112,6 +22765,7 @@ var ZCodeAppServerAdapter = class {
   #turnBindingCompatMs;
   #replayIdleMs;
   #browser;
+  #probe;
   #runs = /* @__PURE__ */ new Map();
   #workspaceByTask = /* @__PURE__ */ new Map();
   constructor(options = {}) {
@@ -22122,6 +22776,7 @@ var ZCodeAppServerAdapter = class {
     this.#homeDir = options.homeDir ?? homedir3();
     this.#host = validateHostProfile(options.host ?? codexHostProfile(this.#homeDir));
     this.#now = options.now ?? (() => /* @__PURE__ */ new Date());
+    this.#probe = options.probe ?? createPlatformProbe();
     this.#resolveInteraction = options.resolveInteraction;
     this.#onOutcomeCheckpoint = options.onOutcomeCheckpoint;
     this.#onInteractionState = options.onInteractionState;
@@ -22197,6 +22852,8 @@ var ZCodeAppServerAdapter = class {
     const entry = {
       handle,
       child: null,
+      childIdentity: null,
+      childExitSeen: false,
       client: null,
       sessionId: resumeSessionId,
       finished: false,
@@ -22688,7 +23345,7 @@ var ZCodeAppServerAdapter = class {
       await this.#closeBrowserHost(entry);
       try {
         if (entry.client) await entry.client.close();
-        else if (entry.child?.pid) await terminateProcessTree(entry.child.pid);
+        else if (entry.child?.pid) await this.#terminateOwnedChild(entry);
       } catch (cleanupError) {
         const browserSuffix = entry.browserCleanupError ? ` Managed browser cleanup is also unverified: ${entry.browserCleanupError}` : "";
         throw new BridgeError("cleanup_failed", `ZCode process termination could not be verified; workspace remains occupied.${browserSuffix}`, { cause: cleanupError });
@@ -22728,6 +23385,28 @@ var ZCodeAppServerAdapter = class {
     let stdoutBuffer = "";
     let rpcId = 0;
     let closed = false;
+    child.once("exit", () => {
+      entry.childExitSeen = true;
+    });
+    const generationChild = {
+      get pid() {
+        return child.pid;
+      },
+      get exitCode() {
+        return child.exitCode;
+      },
+      get signalCode() {
+        return child.signalCode;
+      },
+      get exitSeen() {
+        return entry.childExitSeen;
+      }
+    };
+    if (process.platform === "win32" && child.pid) {
+      void captureSpawnGenerationIdentity(generationChild, this.#probe).then((identity) => {
+        entry.childIdentity = identity;
+      });
+    }
     const pending = /* @__PURE__ */ new Map();
     let protocolFatal = null;
     const failProtocol = (code, frameBytes, cause, detail) => {
@@ -22869,11 +23548,30 @@ var ZCodeAppServerAdapter = class {
         if (process.platform !== "win32" && child.pid) await terminateProcessTree(child.pid);
         return;
       }
-      if (child.pid && isProcessRunning(child.pid)) await terminateProcessTree(child.pid);
+      if (child.pid && isProcessRunning(child.pid)) {
+        if (entry.childExitSeen) return;
+        await terminateProcessTree(child.pid, {
+          graceMs: 500,
+          killWaitMs: 5e3,
+          expectedRootFingerprint: entry.childIdentity?.pid === child.pid ? entry.childIdentity.fingerprint : null
+        });
+      }
     };
     return { child, request, replayEvents, close, get stderr() {
       return stderr;
     } };
+  }
+  /** ADR-009: terminate the adapter's own spawned child with the identity
+   * captured while its native handle was still held. Windows refuses to
+   * signal without it (a bare current PID is never trusted), and a child
+   * whose 'exit' already fired is never signalled again. POSIX keeps its
+   * existing process-group behaviour. */
+  async #terminateOwnedChild(entry) {
+    const pid = entry.child?.pid;
+    if (!pid) return;
+    if (entry.childExitSeen) return;
+    const fingerprint = entry.childIdentity?.pid === pid ? entry.childIdentity.fingerprint : null;
+    await terminateProcessTree(pid, { graceMs: 500, killWaitMs: 5e3, expectedRootFingerprint: fingerprint });
   }
   #handleMessage(message, entry, pending, config2, write) {
     if (message.method === "session/requestRuntimePreferences") {
@@ -23563,11 +24261,25 @@ import { existsSync as existsSync5, mkdirSync, readFileSync as readFileSync3, re
 import { randomUUID } from "node:crypto";
 import path6 from "node:path";
 var selfIdentity = null;
+var TRANSIENT_LOCK_FS_CODES = /* @__PURE__ */ new Set(["EEXIST", "EPERM", "EACCES", "EBUSY", "ENOTEMPTY"]);
+var DESTINATION_PRESENT_CONTENTION_CODES = /* @__PURE__ */ new Set(["EEXIST", "ENOTEMPTY"]);
+var PUBLICATION_RETRY_ATTEMPTS = 3;
+var WITHDRAW_RETRY_MS = 2e3;
+var SHARED_GUARD_RETRY_MS = 2e3;
+var PRIVATE_CLEANUP_RETRY_MS = 1e3;
+var RETRY_PAUSE_MS = 10;
+function isTransientLockFsError(error62) {
+  return TRANSIENT_LOCK_FS_CODES.has(error62?.code ?? "");
+}
+function pauseBriefly() {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, RETRY_PAUSE_MS);
+}
 function tryAcquireProcessLock(directory) {
   return tryAcquireProcessLockWithRetry(directory, 0);
 }
 function tryAcquireProcessLockWithRetry(directory, retries) {
   const token = randomUUID();
+  if (existsSync5(directory)) return acquireExistingLock(directory);
   const staging = `${directory}.${process.pid}.${token}.pending`;
   const ownerRecord = {
     pid: process.pid,
@@ -23584,14 +24296,16 @@ function tryAcquireProcessLockWithRetry(directory, retries) {
       renameSync(staging, directory);
     } catch (error62) {
       removeStagedLock(staging);
-      if (!existsSync5(directory)) {
-        const code = error62.code;
-        if (retries < 3 && (code === "EEXIST" || code === "EPERM" || code === "EACCES")) {
-          return tryAcquireProcessLockWithRetry(directory, retries + 1);
-        }
-        throw error62;
+      const code = error62.code;
+      if (!isTransientLockFsError(error62)) throw error62;
+      if (DESTINATION_PRESENT_CONTENTION_CODES.has(code ?? "") || existsSync5(directory)) {
+        return acquireExistingLock(directory);
       }
-      return acquireExistingLock(directory);
+      if (retries < PUBLICATION_RETRY_ATTEMPTS) {
+        pauseBriefly();
+        return tryAcquireProcessLockWithRetry(directory, retries + 1);
+      }
+      throw error62;
     }
   } catch (error62) {
     removeStagedLock(staging);
@@ -23601,38 +24315,72 @@ function tryAcquireProcessLockWithRetry(directory, retries) {
     const owner = JSON.parse(readFileSync3(path6.join(directory, "owner.json"), "utf8"));
     if (owner.token !== token) throw new Error("process lock ownership changed");
     const retired = `${directory}.${token}.retired`;
-    renameSync(directory, retired);
+    renameWithTransientRetry(directory, retired);
     removeStagedLock(retired);
   };
 }
-function acquireExistingLock(directory) {
-  try {
-    const owner = JSON.parse(readFileSync3(path6.join(directory, "owner.json"), "utf8"));
-    if (!Number.isSafeInteger(owner.pid) || owner.pid <= 0) throw new Error("invalid lock owner");
+function renameWithTransientRetry(source, target) {
+  const deadline = Date.now() + WITHDRAW_RETRY_MS;
+  while (true) {
     try {
-      process.kill(owner.pid, 0);
-    } catch (failure2) {
-      if (failure2.code === "ESRCH") {
-        if (reclaimDeadOwner(directory)) return tryAcquireProcessLock(directory);
-      }
+      renameSync(source, target);
+      return;
+    } catch (error62) {
+      if (!isTransientLockFsError(error62) || Date.now() >= deadline) throw error62;
+      pauseBriefly();
     }
+  }
+}
+function acquireExistingLock(directory) {
+  let owner;
+  try {
+    owner = JSON.parse(readFileSync3(path6.join(directory, "owner.json"), "utf8"));
+    if (!Number.isSafeInteger(owner.pid) || owner.pid <= 0) throw new Error("invalid lock owner");
   } catch {
     try {
       if (Date.now() - statSync2(directory).mtimeMs > 3e4) throw new Error(`unreadable lock owner: ${directory}`);
     } catch (failure2) {
       if (failure2.code !== "ENOENT") throw failure2;
     }
+    return null;
+  }
+  try {
+    process.kill(owner.pid, 0);
+  } catch (failure2) {
+    if (failure2.code === "ESRCH") {
+      if (reclaimDeadOwner(directory)) return tryAcquireProcessLock(directory);
+    }
   }
   return null;
 }
 function removeStagedLock(directory) {
-  try {
-    unlinkSync(path6.join(directory, "owner.json"));
-  } catch {
+  removePrivateFile(path6.join(directory, "owner.json"));
+  removePrivateDirectory(directory);
+}
+function removePrivateFile(file2) {
+  const deadline = Date.now() + PRIVATE_CLEANUP_RETRY_MS;
+  while (true) {
+    try {
+      unlinkSync(file2);
+      return;
+    } catch (error62) {
+      const code = error62?.code;
+      if (code === "ENOENT" || !isTransientLockFsError(error62) || Date.now() >= deadline) return;
+      pauseBriefly();
+    }
   }
-  try {
-    rmdirSync(directory);
-  } catch {
+}
+function removePrivateDirectory(directory) {
+  const deadline = Date.now() + PRIVATE_CLEANUP_RETRY_MS;
+  while (true) {
+    try {
+      rmdirSync(directory);
+      return;
+    } catch (error62) {
+      const code = error62?.code;
+      if (code === "ENOENT" || !isTransientLockFsError(error62) || Date.now() >= deadline) return;
+      pauseBriefly();
+    }
   }
 }
 function reclaimDeadOwner(directory) {
@@ -23643,24 +24391,56 @@ function reclaimDeadOwner(directory) {
     if (error62.code === "EEXIST") return false;
     throw error62;
   }
+  let outcome;
   try {
     const owner = JSON.parse(readFileSync3(path6.join(directory, "owner.json"), "utf8"));
-    if (!Number.isSafeInteger(owner.pid) || owner.pid <= 0) return false;
-    try {
-      process.kill(owner.pid, 0);
-      return false;
-    } catch (error62) {
-      if (error62.code !== "ESRCH") return false;
+    if (!Number.isSafeInteger(owner.pid) || owner.pid <= 0) {
+      outcome = { kind: "busy" };
+    } else {
+      try {
+        process.kill(owner.pid, 0);
+        outcome = { kind: "busy" };
+      } catch (failure2) {
+        if (failure2.code !== "ESRCH") {
+          outcome = { kind: "busy" };
+        } else {
+          const retired = `${directory}.${randomUUID()}.retired`;
+          renameWithTransientRetry(directory, retired);
+          removeStagedLock(retired);
+          outcome = { kind: "reclaimed" };
+        }
+      }
     }
-    const retired = `${directory}.${randomUUID()}.retired`;
-    renameSync(directory, retired);
-    removeStagedLock(retired);
-    return true;
   } catch (error62) {
-    if (error62.code !== "ENOENT") throw error62;
-    return false;
-  } finally {
-    rmdirSync(guard);
+    outcome = error62.code === "ENOENT" ? { kind: "busy" } : { kind: "error", error: error62 };
+  }
+  let guardCleanupError = null;
+  try {
+    removeSharedGuard(guard);
+  } catch (error62) {
+    guardCleanupError = error62;
+  }
+  if (outcome.kind === "error") throw outcome.error;
+  if (guardCleanupError !== null) throw guardCleanupError;
+  return outcome.kind === "reclaimed";
+}
+function removeSharedGuard(guard) {
+  const deadline = Date.now() + SHARED_GUARD_RETRY_MS;
+  while (true) {
+    try {
+      rmdirSync(guard);
+      return;
+    } catch (error62) {
+      const code = error62?.code;
+      if (code === "ENOENT") return;
+      if (!isTransientLockFsError(error62) || Date.now() >= deadline) {
+        throw new Error(
+          `could not remove the lock reclaim guard at ${guard} (${code ?? "unknown error"}); a leftover guard blocks all future dead-owner reclaims of this lock and needs manual diagnosis`,
+          { cause: error62 }
+        );
+      }
+      pauseBriefly();
+    }
   }
 }
 
@@ -23854,7 +24634,14 @@ var TaskStore = class {
       this.assertWorkerAttempt(taskId2, attempt);
       this.#writeJsonAtomic(path7.join(this.taskDir(taskId2), "result.json"), result);
       const current = this.readStatus(taskId2);
-      this.#writeJsonAtomic(path7.join(this.taskDir(taskId2), "status.json"), { ...current, ...patch, task_id: taskId2, attempt, updated_at: (/* @__PURE__ */ new Date()).toISOString() });
+      let effective = patch;
+      if (current.cleanup_unverified === true) {
+        effective = { ...patch, cleanup_unverified: true };
+        if (typeof current.error === "string" && current.error.includes("[cleanup-members:")) {
+          effective = { ...effective, error: current.error };
+        }
+      }
+      this.#writeJsonAtomic(path7.join(this.taskDir(taskId2), "status.json"), { ...current, ...effective, task_id: taskId2, attempt, updated_at: (/* @__PURE__ */ new Date()).toISOString() });
     });
   }
   patchRunningAttempt(taskId2, attempt, patch) {
@@ -24857,18 +25644,18 @@ async function runWorkerTask(options) {
     }
   };
   if (initialStatus.cancel_requested === true) {
-    const finishedAt2 = now().toISOString();
-    const result2 = buildTaskResult({
+    const finishedAt = now().toISOString();
+    const result = buildTaskResult({
       task,
       attempt,
       startedAt: initialStatus.started_at,
-      finishedAt: finishedAt2,
+      finishedAt,
       outcome: null,
       failure: { code: "cancelled", message: "cancelled by request before the worker started the agent" },
       cancelled: true
     });
-    store.commitWorkerResult(taskId2, attempt, result2, { status: "cancelled", finished_at: finishedAt2, worker_pid: null });
-    return { status: result2.status, result: result2 };
+    store.commitWorkerResult(taskId2, attempt, result, { status: "cancelled", finished_at: finishedAt, worker_pid: null });
+    return { status: result.status, result };
   }
   const startedAt = initialStatus.started_at ?? now().toISOString();
   store.writeStatus(taskId2, { status: "running", started_at: startedAt, worker_pid: process.pid }, attempt);
@@ -24878,8 +25665,22 @@ async function runWorkerTask(options) {
     started_at: startedAt
   });
   writePhase();
-  void probe.selfIdentity().then(
+  const IDENTITY_WRITE_REAP_MS = 2e3;
+  const identityWrites = /* @__PURE__ */ new Set();
+  let identityWritesClosed = false;
+  const trackIdentityWrite = (write) => {
+    identityWrites.add(write);
+    void write.then(() => identityWrites.delete(write), () => identityWrites.delete(write));
+  };
+  const reapIdentityWrites = async () => {
+    if (identityWritesClosed) return;
+    const deadline = Date.now() + IDENTITY_WRITE_REAP_MS;
+    while (identityWrites.size > 0 && Date.now() < deadline) await sleep2(25);
+    identityWritesClosed = true;
+  };
+  trackIdentityWrite(probe.selfIdentity().then(
     (identity) => {
+      if (identityWritesClosed) return;
       store.writeExecutorIdentity(taskId2, attempt, { worker: identity });
       observationRevision += 1;
       try {
@@ -24888,421 +25689,429 @@ async function runWorkerTask(options) {
       }
     },
     () => void 0
-  );
-  const heartbeat = {
-    attempt,
-    worker_pid: process.pid,
-    started_at: startedAt,
-    heartbeat_at: now().toISOString(),
-    heartbeat_seq: 0,
-    session_id: initialStatus.zcode_session_id ?? null,
-    turn_id: null,
-    last_event_seq: 0,
-    last_event_type: "worker_running",
-    zcode_event_seq: 0
-  };
-  const persistHeartbeat = () => {
-    heartbeat.heartbeat_at = now().toISOString();
-    heartbeat.heartbeat_seq += 1;
-    store.writeWorkerHeartbeat(taskId2, attempt, heartbeat);
-    writePhase();
-  };
-  persistHeartbeat();
-  const heartbeatTimer = setInterval(() => {
-    try {
-      persistHeartbeat();
-    } catch {
-    }
-  }, 3e3);
-  heartbeatTimer.unref();
-  const continueSpec = store.readAttemptMeta(taskId2, attempt, "continue.json");
-  const previousResult = continueSpec ? store.readArchivedResult(taskId2, continueSpec.previous_attempt ?? attempt - 1) : null;
-  const promptText = continueSpec ? buildContinuePrompt({
-    task,
-    feedback: continueSpec.feedback,
-    additionalRequirements: continueSpec.additional_requirements ?? [],
-    previousSessionId: continueSpec.previous_session_id,
-    previousResult
-  }) : buildTaskPrompt(task);
-  store.writeAttemptFile(taskId2, attempt, "prompt.txt", promptText);
-  const correlation = {
-    rpc_accepted_at: null,
-    turn_started_at: null,
-    turn_completed_at: null,
-    turn_id: null,
-    session_id: initialStatus.zcode_session_id ?? null
-  };
-  const persistCorrelation = () => {
-    try {
-      store.writeAttemptMeta(taskId2, attempt, "turn-correlation.json", { ...correlation });
-    } catch {
-    }
-  };
-  const persistCorrelationTimer = setInterval(persistCorrelation, 5e3);
-  persistCorrelationTimer.unref();
-  const modelProfile = {
-    executor: "zcode",
-    provider_id: null,
-    model_id: null,
-    requested_model: task.model ? `${task.model.provider_id}/${task.model.model_id}` : null,
-    requested_reasoning_level: task.model?.reasoning_level ?? null,
-    effective_reasoning_level: null,
-    effective_reasoning_level_source: "not_reported",
-    selection_source: null,
-    effective_at: null,
-    session_id: initialStatus.zcode_session_id ?? null,
-    turn_id: null
-  };
-  let outcome = null;
-  let failure2 = null;
-  let pendingModelOutput = "";
-  let lastModelOutputAt = 0;
-  const flushModelOutput = () => {
-    if (!pendingModelOutput) return;
-    store.assertWorkerAttempt(taskId2, attempt);
-    for (let offset = 0; offset < pendingModelOutput.length; offset += 2e3) store.appendEvent(taskId2, "model_output", pendingModelOutput.slice(offset, offset + 2e3));
-    pendingModelOutput = "";
-    lastModelOutputAt = Date.now();
-  };
+  ));
+  let heartbeatTimer;
+  let persistCorrelationTimer;
   try {
-    if (options.resolver) {
-      await options.resolver.resolve();
-    }
-    const adapter = options.adapter ?? new ZCodeAppServerAdapter({
-      host: options.host,
-      ...options.resolver ? { resolver: options.resolver } : {},
-      onEvent: (event) => {
-        store.assertWorkerAttempt(taskId2, attempt);
-        if (event.type === "model_output") {
-          pendingModelOutput += event.summary;
-          if (pendingModelOutput.length >= 4e3 || Date.now() - lastModelOutputAt >= 500) flushModelOutput();
-          return;
-        }
-        flushModelOutput();
-        const persistedEvent = store.appendEvent(taskId2, event.type, event.summary, event.details);
-        if (persistedEvent) {
-          heartbeat.last_event_seq = persistedEvent.seq;
-          heartbeat.last_event_type = event.type;
-        }
-        const sessionId = event.type === "session_ready" ? event.details?.["session_id"] : void 0;
-        if (typeof sessionId === "string") {
-          heartbeat.session_id = sessionId;
-          correlation.session_id = sessionId;
-          modelProfile.session_id = sessionId;
-          store.writeStatus(taskId2, { zcode_session_id: sessionId }, attempt);
-        }
-        if (event.type === "turn_started") {
-          correlation.rpc_accepted_at = correlation.rpc_accepted_at ?? now().toISOString();
-          correlation.turn_started_at = now().toISOString();
-          if (typeof event.details?.["turn_id"] === "string") {
-            heartbeat.turn_id = event.details["turn_id"];
-            correlation.turn_id = event.details["turn_id"];
-            modelProfile.turn_id = event.details["turn_id"];
-          }
-          activityPhase = "executing";
-          writePhase();
-        }
-        if (event.type === "turn_completed") {
-          correlation.turn_completed_at = now().toISOString();
-          activityPhase = "finalizing";
-          writePhase();
-        }
-        if (event.type === "model_selected") {
-          if (typeof event.details?.["provider_id"] === "string") modelProfile.provider_id = event.details["provider_id"];
-          if (typeof event.details?.["model_id"] === "string") modelProfile.model_id = event.details["model_id"];
-          if (typeof event.details?.["selected_model"] === "string" && modelProfile.model_id === null) {
-            modelProfile.model_id = event.details["selected_model"];
-          }
-          if (typeof event.details?.["reasoning_level"] === "string") {
-            modelProfile.effective_reasoning_level = event.details["reasoning_level"];
-            modelProfile.effective_reasoning_level_source = "runtime";
-          }
-          if (typeof event.details?.["model_source"] === "string") modelProfile.selection_source = event.details["model_source"];
-          modelProfile.effective_at = now().toISOString();
-        }
-        if (typeof event.details?.["event_seq"] === "number") heartbeat.zcode_event_seq = event.details["event_seq"];
-        if (event.type === "app_server_started" && typeof event.details?.["pid"] === "number") {
-          store.writeStatus(taskId2, { zcode_pid: event.details["pid"] }, attempt);
-          void probe.identityOf(event.details["pid"]).then(
-            (identity) => {
-              try {
-                store.writeExecutorIdentity(taskId2, attempt, { runtime: identity });
-                observationRevision += 1;
-                store.writeWorkerObservation(taskId2, attempt, process.pid, { runtime_identity: identity }, observationRevision, now().toISOString());
-              } catch {
-              }
-            },
-            () => void 0
-          );
-        }
-      },
-      onInteractionState: (state) => {
-        activityPhase = state === "waiting" ? "waiting_for_permission" : "executing";
-        writePhase();
-      },
-      onOutcomeCheckpoint: (checkpoint) => {
-        store.writeAttemptMeta(taskId2, attempt, "outcome-checkpoint.json", {
-          recorded_at: now().toISOString(),
-          exit_code: checkpoint.exitCode,
-          signal: checkpoint.signal,
-          session_id: checkpoint.sessionId,
-          response: checkpoint.response,
-          usage: checkpoint.usage,
-          error_code: checkpoint.errorCode,
-          report_error: checkpoint.reportError,
-          agent_report: checkpoint.agentReport,
-          report_candidate: checkpoint.reportCandidate,
-          cleanup_error: checkpoint.cleanupError ?? null,
-          cleanup_verified: checkpoint.cleanupVerified === true,
-          usage_normalized: normalizeUsage(checkpoint.usage, { source: "zcode_runtime_turn", scope: checkpoint.sessionId ? `session:${checkpoint.sessionId}` : null, observedAt: now().toISOString() }),
-          model_profile: modelProfile
-        });
-      },
-      resolveInteraction: async (request, signal) => {
-        store.assertWorkerAttempt(taskId2, attempt);
-        const safeRequest = sanitizeInteractionRequest({ ...request, request_id: `${attempt}:${request.request_id}` });
-        let record2;
-        let created = false;
-        try {
-          const written = store.writeInteractionRequest(taskId2, safeRequest, now().toISOString());
-          record2 = written.record;
-          created = written.created;
-        } catch (error62) {
-          if (error62 instanceof InteractionRequestTooLargeError) {
-            store.appendEvent(taskId2, "interaction_request_oversized", `ZCode requested approval of a tool input too large to deliver: ${error62.actualBytes} UTF-8 bytes, over the ${error62.limitBytes}-byte limit; the request was declined and nothing was executed`, {
-              error_code: "interaction_params_over_limit",
-              request_id: safeRequest.request_id,
-              method: safeRequest.method,
-              actual_bytes: error62.actualBytes,
-              limit_bytes: error62.limitBytes
-            }, now().toISOString());
-            return interactionDecline2(
-              request.method,
-              `Bridge cannot deliver this approval request: the tool input is ${error62.actualBytes} UTF-8 bytes, over the ${error62.limitBytes}-byte limit. Split the input into smaller parts (for example write the file in multiple Write or append steps) and retry. Nothing was executed.`
-            );
-          }
-          store.appendEvent(taskId2, "interaction_request_undeliverable", "ZCode requested approval but the Bridge could not persist the request for the calling host; the request was declined and nothing was executed", {
-            error_code: "interaction_persist_failed",
-            request_id: safeRequest.request_id,
-            method: safeRequest.method
-          }, now().toISOString());
-          return interactionDecline2(
-            request.method,
-            `Bridge could not persist this approval request for the calling host (${safeErrorSummary(error62)}); the request was declined and nothing was executed. Split the input into smaller parts and retry.`
-          );
-        }
-        activityPhase = request.method === "interaction/requestPermission" ? "waiting_for_permission" : "waiting_for_user";
-        writePhase();
-        if (created) {
-          const published = publishInteractionRequest(store, taskId2, safeRequest, record2);
-          if (!published.event) {
-            store.appendEvent(taskId2, "interaction_request_undeliverable", `ZCode requested approval but the Bridge could not publish it to the calling host (${published.declineReason}); the request was declined and nothing was executed`, {
-              error_code: "interaction_publish_failed",
-              request_id: safeRequest.request_id,
-              method: safeRequest.method
-            }, now().toISOString());
-            const fallback = interactionDecline2(request.method, published.declineReason);
-            store.answerInteractionRequest(taskId2, safeRequest.request_id, fallback, now().toISOString());
-            activityPhase = "executing";
-            writePhase();
-            return fallback;
-          }
-        }
-        let answer = null;
-        while (!signal.aborted) {
+    const heartbeat = {
+      attempt,
+      worker_pid: process.pid,
+      started_at: startedAt,
+      heartbeat_at: now().toISOString(),
+      heartbeat_seq: 0,
+      session_id: initialStatus.zcode_session_id ?? null,
+      turn_id: null,
+      last_event_seq: 0,
+      last_event_type: "worker_running",
+      zcode_event_seq: 0
+    };
+    const persistHeartbeat = () => {
+      heartbeat.heartbeat_at = now().toISOString();
+      heartbeat.heartbeat_seq += 1;
+      store.writeWorkerHeartbeat(taskId2, attempt, heartbeat);
+      writePhase();
+    };
+    persistHeartbeat();
+    heartbeatTimer = setInterval(() => {
+      try {
+        persistHeartbeat();
+      } catch {
+      }
+    }, 3e3);
+    heartbeatTimer.unref();
+    const continueSpec = store.readAttemptMeta(taskId2, attempt, "continue.json");
+    const previousResult = continueSpec ? store.readArchivedResult(taskId2, continueSpec.previous_attempt ?? attempt - 1) : null;
+    const promptText = continueSpec ? buildContinuePrompt({
+      task,
+      feedback: continueSpec.feedback,
+      additionalRequirements: continueSpec.additional_requirements ?? [],
+      previousSessionId: continueSpec.previous_session_id,
+      previousResult
+    }) : buildTaskPrompt(task);
+    store.writeAttemptFile(taskId2, attempt, "prompt.txt", promptText);
+    const correlation = {
+      rpc_accepted_at: null,
+      turn_started_at: null,
+      turn_completed_at: null,
+      turn_id: null,
+      session_id: initialStatus.zcode_session_id ?? null
+    };
+    const persistCorrelation = () => {
+      try {
+        store.writeAttemptMeta(taskId2, attempt, "turn-correlation.json", { ...correlation });
+      } catch {
+      }
+    };
+    persistCorrelationTimer = setInterval(persistCorrelation, 5e3);
+    persistCorrelationTimer.unref();
+    const modelProfile = {
+      executor: "zcode",
+      provider_id: null,
+      model_id: null,
+      requested_model: task.model ? `${task.model.provider_id}/${task.model.model_id}` : null,
+      requested_reasoning_level: task.model?.reasoning_level ?? null,
+      effective_reasoning_level: null,
+      effective_reasoning_level_source: "not_reported",
+      selection_source: null,
+      effective_at: null,
+      session_id: initialStatus.zcode_session_id ?? null,
+      turn_id: null
+    };
+    let outcome = null;
+    let failure2 = null;
+    let pendingModelOutput = "";
+    let lastModelOutputAt = 0;
+    const flushModelOutput = () => {
+      if (!pendingModelOutput) return;
+      store.assertWorkerAttempt(taskId2, attempt);
+      for (let offset = 0; offset < pendingModelOutput.length; offset += 2e3) store.appendEvent(taskId2, "model_output", pendingModelOutput.slice(offset, offset + 2e3));
+      pendingModelOutput = "";
+      lastModelOutputAt = Date.now();
+    };
+    try {
+      if (options.resolver) {
+        await options.resolver.resolve();
+      }
+      const adapter = options.adapter ?? new ZCodeAppServerAdapter({
+        host: options.host,
+        ...options.resolver ? { resolver: options.resolver } : {},
+        onEvent: (event) => {
           store.assertWorkerAttempt(taskId2, attempt);
-          let current;
+          if (event.type === "model_output") {
+            pendingModelOutput += event.summary;
+            if (pendingModelOutput.length >= 4e3 || Date.now() - lastModelOutputAt >= 500) flushModelOutput();
+            return;
+          }
+          flushModelOutput();
+          const persistedEvent = store.appendEvent(taskId2, event.type, event.summary, event.details);
+          if (persistedEvent) {
+            heartbeat.last_event_seq = persistedEvent.seq;
+            heartbeat.last_event_type = event.type;
+          }
+          const sessionId = event.type === "session_ready" ? event.details?.["session_id"] : void 0;
+          if (typeof sessionId === "string") {
+            heartbeat.session_id = sessionId;
+            correlation.session_id = sessionId;
+            modelProfile.session_id = sessionId;
+            store.writeStatus(taskId2, { zcode_session_id: sessionId }, attempt);
+          }
+          if (event.type === "turn_started") {
+            correlation.rpc_accepted_at = correlation.rpc_accepted_at ?? now().toISOString();
+            correlation.turn_started_at = now().toISOString();
+            if (typeof event.details?.["turn_id"] === "string") {
+              heartbeat.turn_id = event.details["turn_id"];
+              correlation.turn_id = event.details["turn_id"];
+              modelProfile.turn_id = event.details["turn_id"];
+            }
+            activityPhase = "executing";
+            writePhase();
+          }
+          if (event.type === "turn_completed") {
+            correlation.turn_completed_at = now().toISOString();
+            activityPhase = "finalizing";
+            writePhase();
+          }
+          if (event.type === "model_selected") {
+            if (typeof event.details?.["provider_id"] === "string") modelProfile.provider_id = event.details["provider_id"];
+            if (typeof event.details?.["model_id"] === "string") modelProfile.model_id = event.details["model_id"];
+            if (typeof event.details?.["selected_model"] === "string" && modelProfile.model_id === null) {
+              modelProfile.model_id = event.details["selected_model"];
+            }
+            if (typeof event.details?.["reasoning_level"] === "string") {
+              modelProfile.effective_reasoning_level = event.details["reasoning_level"];
+              modelProfile.effective_reasoning_level_source = "runtime";
+            }
+            if (typeof event.details?.["model_source"] === "string") modelProfile.selection_source = event.details["model_source"];
+            modelProfile.effective_at = now().toISOString();
+          }
+          if (typeof event.details?.["event_seq"] === "number") heartbeat.zcode_event_seq = event.details["event_seq"];
+          if (event.type === "app_server_started" && typeof event.details?.["pid"] === "number") {
+            store.writeStatus(taskId2, { zcode_pid: event.details["pid"] }, attempt);
+            trackIdentityWrite(probe.identityOf(event.details["pid"]).then(
+              (identity) => {
+                if (identityWritesClosed) return;
+                try {
+                  store.writeExecutorIdentity(taskId2, attempt, { runtime: identity });
+                  observationRevision += 1;
+                  store.writeWorkerObservation(taskId2, attempt, process.pid, { runtime_identity: identity }, observationRevision, now().toISOString());
+                } catch {
+                }
+              },
+              () => void 0
+            ));
+          }
+        },
+        onInteractionState: (state) => {
+          activityPhase = state === "waiting" ? "waiting_for_permission" : "executing";
+          writePhase();
+        },
+        onOutcomeCheckpoint: (checkpoint) => {
+          store.writeAttemptMeta(taskId2, attempt, "outcome-checkpoint.json", {
+            recorded_at: now().toISOString(),
+            exit_code: checkpoint.exitCode,
+            signal: checkpoint.signal,
+            session_id: checkpoint.sessionId,
+            response: checkpoint.response,
+            usage: checkpoint.usage,
+            error_code: checkpoint.errorCode,
+            report_error: checkpoint.reportError,
+            agent_report: checkpoint.agentReport,
+            report_candidate: checkpoint.reportCandidate,
+            cleanup_error: checkpoint.cleanupError ?? null,
+            cleanup_verified: checkpoint.cleanupVerified === true,
+            usage_normalized: normalizeUsage(checkpoint.usage, { source: "zcode_runtime_turn", scope: checkpoint.sessionId ? `session:${checkpoint.sessionId}` : null, observedAt: now().toISOString() }),
+            model_profile: modelProfile
+          });
+        },
+        resolveInteraction: async (request, signal) => {
+          store.assertWorkerAttempt(taskId2, attempt);
+          const safeRequest = sanitizeInteractionRequest({ ...request, request_id: `${attempt}:${request.request_id}` });
+          let record2;
+          let created = false;
           try {
-            current = store.readInteractionRequest(taskId2, safeRequest.request_id);
+            const written = store.writeInteractionRequest(taskId2, safeRequest, now().toISOString());
+            record2 = written.record;
+            created = written.created;
           } catch (error62) {
-            activityPhase = "executing";
-            writePhase();
-            store.appendEvent(taskId2, "interaction_request_undeliverable", "The persisted ZCode interaction request became unreadable while waiting for the calling host; the request was declined and nothing was executed", {
-              error_code: "interaction_record_unreadable",
+            if (error62 instanceof InteractionRequestTooLargeError) {
+              store.appendEvent(taskId2, "interaction_request_oversized", `ZCode requested approval of a tool input too large to deliver: ${error62.actualBytes} UTF-8 bytes, over the ${error62.limitBytes}-byte limit; the request was declined and nothing was executed`, {
+                error_code: "interaction_params_over_limit",
+                request_id: safeRequest.request_id,
+                method: safeRequest.method,
+                actual_bytes: error62.actualBytes,
+                limit_bytes: error62.limitBytes
+              }, now().toISOString());
+              return interactionDecline2(
+                request.method,
+                `Bridge cannot deliver this approval request: the tool input is ${error62.actualBytes} UTF-8 bytes, over the ${error62.limitBytes}-byte limit. Split the input into smaller parts (for example write the file in multiple Write or append steps) and retry. Nothing was executed.`
+              );
+            }
+            store.appendEvent(taskId2, "interaction_request_undeliverable", "ZCode requested approval but the Bridge could not persist the request for the calling host; the request was declined and nothing was executed", {
+              error_code: "interaction_persist_failed",
               request_id: safeRequest.request_id,
               method: safeRequest.method
             }, now().toISOString());
             return interactionDecline2(
               request.method,
-              `Bridge can no longer read the full content of this approval request (${safeErrorSummary(error62)}); the request was declined and nothing was executed.`
+              `Bridge could not persist this approval request for the calling host (${safeErrorSummary(error62)}); the request was declined and nothing was executed. Split the input into smaller parts and retry.`
             );
           }
-          if (!current) {
-            activityPhase = "executing";
-            writePhase();
-            store.appendEvent(taskId2, "interaction_request_undeliverable", "The persisted ZCode interaction request disappeared while waiting for the calling host; the request was declined and nothing was executed", {
-              error_code: "interaction_record_missing",
-              request_id: safeRequest.request_id,
-              method: safeRequest.method
-            }, now().toISOString());
-            return interactionDecline2(
-              request.method,
-              "Bridge can no longer read the full content of this approval request (the persisted record disappeared); the request was declined and nothing was executed."
-            );
-          }
-          if (current.state === "answered" && current.answer) {
-            if (current.method !== safeRequest.method || stableJson(current.params) !== stableJson(safeRequest.params)) {
+          activityPhase = request.method === "interaction/requestPermission" ? "waiting_for_permission" : "waiting_for_user";
+          writePhase();
+          if (created) {
+            const published = publishInteractionRequest(store, taskId2, safeRequest, record2);
+            if (!published.event) {
+              store.appendEvent(taskId2, "interaction_request_undeliverable", `ZCode requested approval but the Bridge could not publish it to the calling host (${published.declineReason}); the request was declined and nothing was executed`, {
+                error_code: "interaction_publish_failed",
+                request_id: safeRequest.request_id,
+                method: safeRequest.method
+              }, now().toISOString());
+              const fallback = interactionDecline2(request.method, published.declineReason);
+              store.answerInteractionRequest(taskId2, safeRequest.request_id, fallback, now().toISOString());
               activityPhase = "executing";
               writePhase();
-              store.appendEvent(taskId2, "interaction_request_undeliverable", "The persisted ZCode interaction request no longer matches the request ZCode sent; the request was declined and nothing was executed", {
-                error_code: "interaction_record_mismatch",
+              return fallback;
+            }
+          }
+          let answer = null;
+          while (!signal.aborted) {
+            store.assertWorkerAttempt(taskId2, attempt);
+            let current;
+            try {
+              current = store.readInteractionRequest(taskId2, safeRequest.request_id);
+            } catch (error62) {
+              activityPhase = "executing";
+              writePhase();
+              store.appendEvent(taskId2, "interaction_request_undeliverable", "The persisted ZCode interaction request became unreadable while waiting for the calling host; the request was declined and nothing was executed", {
+                error_code: "interaction_record_unreadable",
                 request_id: safeRequest.request_id,
                 method: safeRequest.method
               }, now().toISOString());
               return interactionDecline2(
                 request.method,
-                "Bridge can no longer read the full content of this approval request (the persisted record no longer matches the request ZCode sent); the request was declined and nothing was executed."
+                `Bridge can no longer read the full content of this approval request (${safeErrorSummary(error62)}); the request was declined and nothing was executed.`
               );
             }
-            answer = current.answer;
-            break;
+            if (!current) {
+              activityPhase = "executing";
+              writePhase();
+              store.appendEvent(taskId2, "interaction_request_undeliverable", "The persisted ZCode interaction request disappeared while waiting for the calling host; the request was declined and nothing was executed", {
+                error_code: "interaction_record_missing",
+                request_id: safeRequest.request_id,
+                method: safeRequest.method
+              }, now().toISOString());
+              return interactionDecline2(
+                request.method,
+                "Bridge can no longer read the full content of this approval request (the persisted record disappeared); the request was declined and nothing was executed."
+              );
+            }
+            if (current.state === "answered" && current.answer) {
+              if (current.method !== safeRequest.method || stableJson(current.params) !== stableJson(safeRequest.params)) {
+                activityPhase = "executing";
+                writePhase();
+                store.appendEvent(taskId2, "interaction_request_undeliverable", "The persisted ZCode interaction request no longer matches the request ZCode sent; the request was declined and nothing was executed", {
+                  error_code: "interaction_record_mismatch",
+                  request_id: safeRequest.request_id,
+                  method: safeRequest.method
+                }, now().toISOString());
+                return interactionDecline2(
+                  request.method,
+                  "Bridge can no longer read the full content of this approval request (the persisted record no longer matches the request ZCode sent); the request was declined and nothing was executed."
+                );
+              }
+              answer = current.answer;
+              break;
+            }
+            await sleep2(250);
           }
-          await sleep2(250);
+          activityPhase = "executing";
+          writePhase();
+          if (answer) return answer;
+          return interactionDecline2(request.method, "The task attempt ended before the calling host replied; nothing was executed");
         }
-        activityPhase = "executing";
-        writePhase();
-        if (answer) return answer;
-        return interactionDecline2(request.method, "The task attempt ended before the calling host replied; nothing was executed");
+      });
+      const workspaceRef = store.readWorkspaceRef(taskId2) ?? {
+        requestedPath: task.workspace,
+        canonicalPath: task.worktree_path ?? task.workspace,
+        mode: task.worktree_path ? "worktree" : "direct",
+        ...task.worktree_path ? { sourcePath: task.workspace } : {}
+      };
+      const handle = continueSpec ? await adapter.continueTask({
+        task,
+        workspace: workspaceRef,
+        attempt,
+        feedback: continueSpec.feedback,
+        additionalRequirements: [...continueSpec.additional_requirements ?? []],
+        previousSessionId: continueSpec.previous_session_id,
+        previousResult
+      }) : await adapter.startTask({ task, workspace: workspaceRef, attempt });
+      let cancelTimer;
+      const cancellation = new Promise((_resolve, reject) => {
+        cancelTimer = setInterval(() => {
+          try {
+            const current = store.readStatus(taskId2);
+            if (current.attempt !== attempt || !current.cancel_requested) return;
+            clearInterval(cancelTimer);
+            void adapter.cancelTask(handle).catch(reject);
+          } catch (error62) {
+            clearInterval(cancelTimer);
+            reject(error62);
+          }
+        }, 50);
+      });
+      try {
+        outcome = await Promise.race([adapter.getResult(handle), cancellation]);
+      } finally {
+        clearInterval(cancelTimer);
       }
-    });
-    const workspaceRef = store.readWorkspaceRef(taskId2) ?? {
-      requestedPath: task.workspace,
-      canonicalPath: task.worktree_path ?? task.workspace,
-      mode: task.worktree_path ? "worktree" : "direct",
-      ...task.worktree_path ? { sourcePath: task.workspace } : {}
-    };
-    const handle = continueSpec ? await adapter.continueTask({
-      task,
-      workspace: workspaceRef,
-      attempt,
-      feedback: continueSpec.feedback,
-      additionalRequirements: [...continueSpec.additional_requirements ?? []],
-      previousSessionId: continueSpec.previous_session_id,
-      previousResult
-    }) : await adapter.startTask({ task, workspace: workspaceRef, attempt });
-    let cancelTimer;
-    const cancellation = new Promise((_resolve, reject) => {
-      cancelTimer = setInterval(() => {
-        try {
-          const current = store.readStatus(taskId2);
-          if (current.attempt !== attempt || !current.cancel_requested) return;
-          clearInterval(cancelTimer);
-          void adapter.cancelTask(handle).catch(reject);
-        } catch (error62) {
-          clearInterval(cancelTimer);
-          reject(error62);
-        }
-      }, 50);
-    });
-    try {
-      outcome = await Promise.race([adapter.getResult(handle), cancellation]);
-    } finally {
-      clearInterval(cancelTimer);
+      if (outcome.cleanupError) failure2 = { code: "cleanup_failed", message: `ZCode returned a turn result, but process cleanup could not be verified: ${outcome.cleanupError}` };
+      flushModelOutput();
+    } catch (error62) {
+      flushModelOutput();
+      failure2 = {
+        code: error62 instanceof BridgeError ? error62.code : "worker_error",
+        message: error62 instanceof Error ? error62.message : String(error62)
+      };
     }
-    if (outcome.cleanupError) failure2 = { code: "cleanup_failed", message: `ZCode returned a turn result, but process cleanup could not be verified: ${outcome.cleanupError}` };
-    flushModelOutput();
-  } catch (error62) {
-    flushModelOutput();
-    failure2 = {
-      code: error62 instanceof BridgeError ? error62.code : "worker_error",
-      message: error62 instanceof Error ? error62.message : String(error62)
-    };
-  }
-  clearInterval(heartbeatTimer);
-  clearInterval(persistCorrelationTimer);
-  activityPhase = "finalizing";
-  writePhase();
-  const finishedAt = now().toISOString();
-  store.assertWorkerAttempt(taskId2, attempt);
-  const stdoutLog = store.appendLog(taskId2, "stdout", outcome?.stdout ? `${outcome.stdout}
+    await reapIdentityWrites();
+    activityPhase = "finalizing";
+    writePhase();
+    const finishedAt = now().toISOString();
+    store.assertWorkerAttempt(taskId2, attempt);
+    const stdoutLog = store.appendLog(taskId2, "stdout", outcome?.stdout ? `${outcome.stdout}
 ` : "");
-  const stderrLog = store.appendLog(
-    taskId2,
-    "stderr",
-    outcome?.stderr ? `${outcome.stderr}
+    const stderrLog = store.appendLog(
+      taskId2,
+      "stderr",
+      outcome?.stderr ? `${outcome.stderr}
 ` : failure2 ? `${failure2.code}: ${failure2.message}
 ` : ""
-  );
-  if (modelProfile.model_id === null && outcome?.modelProfile?.model_id) {
-    Object.assign(modelProfile, outcome.modelProfile);
+    );
+    if (modelProfile.model_id === null && outcome?.modelProfile?.model_id) {
+      Object.assign(modelProfile, outcome.modelProfile);
+    }
+    correlation.rpc_accepted_at = correlation.rpc_accepted_at ?? outcome?.phaseTimestamps?.rpc_accepted_at ?? null;
+    correlation.turn_started_at = correlation.turn_started_at ?? outcome?.phaseTimestamps?.turn_started_at ?? null;
+    correlation.turn_completed_at = correlation.turn_completed_at ?? outcome?.phaseTimestamps?.turn_completed_at ?? null;
+    if (modelProfile.turn_id === null && correlation.turn_id) modelProfile.turn_id = correlation.turn_id;
+    const timingNotes = [];
+    const timing = {
+      queued_ms: phaseDuration(initialStatus.created_at, startedAt, timingNotes),
+      execution_ms: phaseDuration(startedAt, finishedAt, timingNotes),
+      turn_ms: phaseDuration(correlation.turn_started_at, correlation.turn_completed_at, timingNotes),
+      finalize_ms: phaseDuration(correlation.turn_completed_at, finishedAt, timingNotes),
+      wall_ms: phaseDuration(startedAt, finishedAt, timingNotes),
+      derived: false,
+      notes: timingNotes
+    };
+    const usage = normalizeUsage(outcome?.usage ?? null, {
+      source: "zcode_runtime_turn",
+      scope: outcome?.sessionId ? `session:${outcome.sessionId}` : null,
+      observedAt: finishedAt
+    });
+    persistCorrelation();
+    store.writeAttemptMeta(taskId2, attempt, "outcome.json", {
+      started_at: startedAt,
+      finished_at: finishedAt,
+      failure: failure2,
+      outcome: outcome ? {
+        exitCode: outcome.exitCode,
+        signal: outcome.signal,
+        sessionId: outcome.sessionId,
+        response: outcome.response,
+        usage: outcome.usage,
+        timedOut: outcome.timedOut,
+        cancelled: outcome.cancelled,
+        attempts: outcome.attempts,
+        errorCode: outcome.errorCode,
+        reportError: outcome.reportError,
+        stdoutTruncated: outcome.stdoutTruncated,
+        stderrTruncated: outcome.stderrTruncated,
+        agentReport: outcome.agentReport,
+        reportCandidate: outcome.reportCandidate,
+        cleanupError: outcome.cleanupError ?? null,
+        cleanupVerified: outcome.cleanupVerified === true
+      } : null,
+      usage_normalized: usage,
+      model_profile: modelProfile,
+      timing,
+      correlation: { ...correlation },
+      logs: { stdout_truncated: stdoutLog.truncated, stderr_truncated: stderrLog.truncated }
+    });
+    const result = buildTaskResult({
+      task,
+      attempt,
+      startedAt,
+      finishedAt,
+      outcome,
+      failure: failure2,
+      cancelled: outcome?.cancelled === true || failure2?.code === "cancelled",
+      sessionId: store.readStatus(taskId2).zcode_session_id ?? continueSpec?.previous_session_id,
+      usage,
+      model: modelProfile,
+      timing
+    });
+    store.appendEvent(taskId2, "task_finished", `Task reached terminal status: ${result.status}`, {
+      status: result.status,
+      needs_master_decision: result.needs_master_decision
+    }, finishedAt);
+    store.commitWorkerResult(taskId2, attempt, result, {
+      status: result.status,
+      finished_at: finishedAt,
+      exit_code: result.exit_code,
+      zcode_session_id: result.session_id,
+      error_code: result.error_code ?? null,
+      error: result.status === "failed" ? result.summary : null,
+      worker_pid: null,
+      cleanup_unverified: failure2?.code === "cleanup_failed",
+      zcode_pid: failure2?.code === "cleanup_failed" ? store.readStatus(taskId2).zcode_pid : null
+    });
+    return { status: result.status, result };
+  } finally {
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    if (persistCorrelationTimer) clearInterval(persistCorrelationTimer);
+    await reapIdentityWrites();
   }
-  correlation.rpc_accepted_at = correlation.rpc_accepted_at ?? outcome?.phaseTimestamps?.rpc_accepted_at ?? null;
-  correlation.turn_started_at = correlation.turn_started_at ?? outcome?.phaseTimestamps?.turn_started_at ?? null;
-  correlation.turn_completed_at = correlation.turn_completed_at ?? outcome?.phaseTimestamps?.turn_completed_at ?? null;
-  if (modelProfile.turn_id === null && correlation.turn_id) modelProfile.turn_id = correlation.turn_id;
-  const timingNotes = [];
-  const timing = {
-    queued_ms: phaseDuration(initialStatus.created_at, startedAt, timingNotes),
-    execution_ms: phaseDuration(startedAt, finishedAt, timingNotes),
-    turn_ms: phaseDuration(correlation.turn_started_at, correlation.turn_completed_at, timingNotes),
-    finalize_ms: phaseDuration(correlation.turn_completed_at, finishedAt, timingNotes),
-    wall_ms: phaseDuration(startedAt, finishedAt, timingNotes),
-    derived: false,
-    notes: timingNotes
-  };
-  const usage = normalizeUsage(outcome?.usage ?? null, {
-    source: "zcode_runtime_turn",
-    scope: outcome?.sessionId ? `session:${outcome.sessionId}` : null,
-    observedAt: finishedAt
-  });
-  persistCorrelation();
-  store.writeAttemptMeta(taskId2, attempt, "outcome.json", {
-    started_at: startedAt,
-    finished_at: finishedAt,
-    failure: failure2,
-    outcome: outcome ? {
-      exitCode: outcome.exitCode,
-      signal: outcome.signal,
-      sessionId: outcome.sessionId,
-      response: outcome.response,
-      usage: outcome.usage,
-      timedOut: outcome.timedOut,
-      cancelled: outcome.cancelled,
-      attempts: outcome.attempts,
-      errorCode: outcome.errorCode,
-      reportError: outcome.reportError,
-      stdoutTruncated: outcome.stdoutTruncated,
-      stderrTruncated: outcome.stderrTruncated,
-      agentReport: outcome.agentReport,
-      reportCandidate: outcome.reportCandidate,
-      cleanupError: outcome.cleanupError ?? null,
-      cleanupVerified: outcome.cleanupVerified === true
-    } : null,
-    usage_normalized: usage,
-    model_profile: modelProfile,
-    timing,
-    correlation: { ...correlation },
-    logs: { stdout_truncated: stdoutLog.truncated, stderr_truncated: stderrLog.truncated }
-  });
-  const result = buildTaskResult({
-    task,
-    attempt,
-    startedAt,
-    finishedAt,
-    outcome,
-    failure: failure2,
-    cancelled: outcome?.cancelled === true || failure2?.code === "cancelled",
-    sessionId: store.readStatus(taskId2).zcode_session_id ?? continueSpec?.previous_session_id,
-    usage,
-    model: modelProfile,
-    timing
-  });
-  store.appendEvent(taskId2, "task_finished", `Task reached terminal status: ${result.status}`, {
-    status: result.status,
-    needs_master_decision: result.needs_master_decision
-  }, finishedAt);
-  store.commitWorkerResult(taskId2, attempt, result, {
-    status: result.status,
-    finished_at: finishedAt,
-    exit_code: result.exit_code,
-    zcode_session_id: result.session_id,
-    error_code: result.error_code ?? null,
-    error: result.status === "failed" ? result.summary : null,
-    worker_pid: null,
-    cleanup_unverified: failure2?.code === "cleanup_failed",
-    zcode_pid: failure2?.code === "cleanup_failed" ? store.readStatus(taskId2).zcode_pid : null
-  });
-  return { status: result.status, result };
 }
 function interactionSummary(request) {
   const params = request.params;

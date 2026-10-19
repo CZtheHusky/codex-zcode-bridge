@@ -36,6 +36,9 @@ import { parseZcodeEnvelope } from "./envelope.js";
 import { parseAgentReport } from "./agent-report.js";
 import {
   appendBounded,
+  captureSpawnGenerationIdentity,
+  childStillOnSpawnGeneration,
+  createPlatformProbe,
   defaultSpawnFunction,
   terminateProcessTree,
   type BoundedText,
@@ -85,6 +88,9 @@ export interface ZCodeAdapterOptions {
   resolver?: RuntimeResolver;
   spawnImpl?: SpawnFunction;
   terminateProcessTreeImpl?: TerminateProcessTree;
+  /** Platform probe for the spawn-generation identity capture (ADR-009);
+   * defaults to the real platform probe. */
+  probe?: import("../runtime/process-probe.js").ProcessProbe;
   /** Wall-clock budget per attempt; default 60 minutes. */
   timeoutMs?: number;
   /** Capture cap per stream in bytes; default 10 MiB. */
@@ -127,6 +133,16 @@ interface RunEntry {
   readonly timeoutMs: number;
   child: SpawnedProcess | null;
   zcodePid: number | null;
+  /** ADR-009: spawn-generation identity captured while libuv still holds the
+   * child's native handle (before its close/exit event); Windows termination
+   * refuses to signal without it. */
+  childIdentity: { pid: number; fingerprint: string } | null;
+  /** True once the CURRENT generation's close event fired. Reset on every
+   * retry spawn (review-round-2 C1); exit-state continuity per ADR-009 is
+   * decided from the current child's exitCode/signalCode, with this flag as
+   * the close-side bound — never as proof that a native handle is still
+   * held (that guarantee belongs to the exit state). */
+  childClosed: boolean;
   cancelRequested: boolean;
   timedOut: boolean;
   finished: boolean;
@@ -142,6 +158,7 @@ export class ZCodeAdapter implements CodingAgentAdapter {
   readonly #resolver: RuntimeResolver;
   readonly #spawnImpl: SpawnFunction;
   readonly #terminateImpl: TerminateProcessTree;
+  readonly #probe: import("../runtime/process-probe.js").ProcessProbe;
   readonly #timeoutMs: number | null;
   readonly #maxOutputBytes: number;
   readonly #retryBackoffMs: number;
@@ -158,6 +175,7 @@ export class ZCodeAdapter implements CodingAgentAdapter {
     this.#resolver = options.resolver ?? new NodeRuntimeResolver();
     this.#spawnImpl = options.spawnImpl ?? defaultSpawnFunction;
     this.#terminateImpl = options.terminateProcessTreeImpl ?? terminateProcessTree;
+    this.#probe = options.probe ?? createPlatformProbe();
     this.#timeoutMs = options.timeoutMs ?? null;
     this.#maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
     this.#retryBackoffMs = options.retryBackoffMs ?? DEFAULT_RETRY_BACKOFF_MS;
@@ -286,6 +304,8 @@ export class ZCodeAdapter implements CodingAgentAdapter {
       timeoutMs: this.#timeoutMs ?? resolveTaskTimeout(input.task, this.#childEnvBase ?? process.env),
       child: null,
       zcodePid: null,
+      childIdentity: null,
+      childClosed: false,
       cancelRequested: false,
       timedOut: false,
       finished: false,
@@ -369,6 +389,24 @@ export class ZCodeAdapter implements CodingAgentAdapter {
       }
       entry.child = child;
       entry.zcodePid = typeof child.pid === "number" ? child.pid : null;
+      // Per-generation reset (review-round-2 C1): the RunEntry is REUSED
+      // across the retry policy's spawn generations — every spawn-local
+      // field starts fresh so a closed previous generation can never
+      // short-circuit this generation's termination or leak its identity.
+      entry.childClosed = false;
+      entry.childIdentity = null;
+      // ADR-009: continuity is proven from the child's exit state (Node
+      // delivers exit before close and libuv releases the native handle at
+      // exit delivery). The shared capture re-verifies after every await and
+      // discards fingerprints that raced an exit or lack exact precision.
+      // A late capture from a PREVIOUS generation (its 250 ms retry window
+      // can outlive the spawn of the next) must never overwrite the current
+      // generation's identity, so the assignment is bound to this child.
+      if (process.platform === "win32" && typeof child.pid === "number") {
+        void captureSpawnGenerationIdentity(child, this.#probe).then((identity) => {
+          if (entry.child === child) entry.childIdentity = identity;
+        });
+      }
 
       let stdout: BoundedText = { value: "", truncated: false };
       let stderr: BoundedText = { value: "", truncated: false };
@@ -386,6 +424,7 @@ export class ZCodeAdapter implements CodingAgentAdapter {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        entry.childClosed = true;
         entry.child = null;
         void entry.termination.then(
           () => resolveSnapshot(snapshot),
@@ -410,11 +449,24 @@ export class ZCodeAdapter implements CodingAgentAdapter {
     if (entry.terminationStarted) return entry.termination;
     entry.terminationStarted = true;
     const pid = entry.zcodePid;
-    if (pid === null) {
+    const child = entry.child;
+    // ADR-009: on Windows, exit evidence ends the provable generation even
+    // before stdio close; POSIX keeps its existing close-based behaviour.
+    const generationRefused = process.platform === "win32" && child !== null
+      && !childStillOnSpawnGeneration({ pid: pid ?? undefined, exitCode: child.exitCode, signalCode: child.signalCode, exitSeen: entry.childClosed });
+    if (pid === null || entry.childClosed || generationRefused) {
+      // No recorded pid, or the child's exit was already delivered (its
+      // native handle is released and the PID may have been recycled):
+      // nothing may be signalled (ADR-009). Windows refuses; POSIX callers
+      // only reach here for genuinely closed children.
       entry.termination = Promise.resolve();
       return entry.termination;
     }
-    entry.termination = this.#terminateImpl(pid).then(
+    entry.termination = this.#terminateImpl(pid, {
+      graceMs: 500,
+      killWaitMs: 5_000,
+      expectedRootFingerprint: entry.childIdentity?.pid === pid ? entry.childIdentity.fingerprint : null,
+    }).then(
       () => undefined,
       (error: unknown) => {
         entry.terminationError =

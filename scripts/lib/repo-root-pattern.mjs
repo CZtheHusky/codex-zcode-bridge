@@ -30,9 +30,74 @@
 // path. The delimiters still apply: "file:///app%20Backup/src" extends the
 // segment and must not match, while "file:///app/src" must. Scheme-less
 // percent-encoded spellings are not covered by this check.
+//
+// Filesystem roots are rejected up front (2026-10-17): a POSIX root would
+// match every "//" line comment and every file URI in the bundle, a drive or
+// share root every same-volume absolute path — the check could only produce
+// guaranteed false positives, never a meaningful verdict. Rejecting loudly
+// keeps validate-plugin from silently degrading into a no-op.
+import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+const POSIX_ROOT = /^\/+$/u;
+const DRIVE_ROOT = /^[a-zA-Z]:[\\/]?$/u;
+const EXTENDED_DRIVE_ROOT = /^\\\\[.?]\\[a-zA-Z]:[\\/]?$/u;
+const UNC_SHARE_ROOT = /^\\\\(?:\?\\UNC\\)?[^\\/]+[\\/][^\\/]+[\\/]?$/u;
+
+/** Root predicates are separator-agnostic: a root consists only of the
+ * volume designator plus separators, so testing the backslash-mapped spelling
+ * with the slash-based patterns covers both spellings at once. */
+const asRootLike = (value) => value.replace(/\\/gu, "/");
+
+const isPosixRoot = (value) => POSIX_ROOT.test(asRootLike(value));
+const isDriveRoot = (value) => DRIVE_ROOT.test(asRootLike(value));
+const isExtendedDriveRoot = (value) => EXTENDED_DRIVE_ROOT.test(value);
+const isUncShareRoot = (value) => UNC_SHARE_ROOT.test(value);
+const isFilesystemRootSpelling = (value) =>
+  isPosixRoot(value) || isDriveRoot(value) || isExtendedDriveRoot(value) || isUncShareRoot(value);
+
+/** Throws an explanatory error when `root` names an entire filesystem,
+ * volume, or share instead of a repository checkout. Public so callers and
+ * tests can share the exact rejection semantics.
+ *
+ * Lexically equivalent spellings count (2026-10-17 review): "/./", "/alpha/.."
+ * and "C:/alpha/.." normalize to roots, and a pattern built from them would
+ * degenerate exactly like the bare root (the file-URI alternative especially).
+ * The guard therefore runs BOTH platform normalizers on every input and tests
+ * every candidate with separator-agnostic root predicates; the ORIGINAL
+ * string is still what gets embedded in the message. Consequences verified
+ * by tests: a named extended-length checkout ("\\?\C:\repo") survives because
+ * its normalized candidates are not roots, while win32.normalize DOES
+ * collapse ".." after an extended prefix ("\\?\C:\repo\.." becomes "\\?\C:",
+ * a drive root) — such a spelling is rejected as the root it collapses to. */
+export function assertNotFilesystemRoot(root) {
+  if (typeof root !== "string" || root.trim() === "") {
+    throw new Error(
+      "buildRepoRootLeakPattern requires a non-empty repository root string; refusing to build a meaningless leak pattern",
+    );
+  }
+  const normalizedCandidates = new Set([root]);
+  for (const normalize of [path.win32.normalize, path.posix.normalize]) {
+    try { normalizedCandidates.add(normalize(root)); } catch { /* platform-specific parse failures keep the original */ }
+  }
+  const rootCandidate = [...normalizedCandidates].find(isFilesystemRootSpelling);
+  if (!rootCandidate) return;
+  const extendedDrive = /^\\\\[.?]\\([a-zA-Z]):/u.exec(rootCandidate);
+  const kind = isPosixRoot(rootCandidate) ? "a POSIX filesystem root"
+    : isDriveRoot(rootCandidate) ? `the root of drive ${asRootLike(rootCandidate).slice(0, 2)}`
+      : extendedDrive ? `the root of drive ${extendedDrive[1]}: (extended-length spelling)`
+        : "the root of a UNC share";
+  const normalizedNote = rootCandidate === root ? "" : ` (lexically equivalent to ${JSON.stringify(rootCandidate)})`;
+  throw new Error(
+    `buildRepoRootLeakPattern refuses the filesystem root ${JSON.stringify(root)}${normalizedNote} (${kind}): `
+    + "every absolute path under it would match, so the leak check could only report false positives "
+    + '(a POSIX root even flags ordinary "//" comments), never a usable verdict. '
+    + "Run validation from a checkout located under a named directory.",
+  );
+}
+
 export function buildRepoRootLeakPattern(root) {
+  assertNotFilesystemRoot(root);
   const escapedRoot = root
     .replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")
     .replace(/\\\\/gu, "[/\\\\]{1,2}");
@@ -49,7 +114,13 @@ export function buildRepoRootLeakPattern(root) {
   // backtick is expressed as \u0060 so it can live inside these templates.
   const startContext = String.raw`[^\s"'=(:,;\\/\u0060]`;
   const terminator = String.raw`[^/\\'"\n\r\t\u0060]`;
-  const httpUrlToken = String.raw`(?<!https?://[^\s"'\u0060]*)`;
+  // The URL suppression covers both an earlier complete scheme ("https://"
+  // plus any run of URL characters) and the position right behind the scheme
+  // colon and its first slash, where the authority begins: a URL whose host
+  // is exactly the root name ("https://app/config" for root /app) is an
+  // ordinary URL, not a local absolute path. A file: URI is never suppressed
+  // (separate alternative below).
+  const httpUrlToken = String.raw`(?<!https?:\/?)(?<!https?://[^\s"'\u0060]*)`;
   return new RegExp(
     `${httpUrlToken}(?<!${startContext})${escapedRoot}(?!${terminator})|(?<!${startContext})(?:${encodedRoot})(?!${terminator})`,
     "iu",

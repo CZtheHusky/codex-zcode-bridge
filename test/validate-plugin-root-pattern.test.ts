@@ -12,7 +12,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { buildRepoRootLeakPattern } from "../scripts/lib/repo-root-pattern.mjs";
+import { assertNotFilesystemRoot, buildRepoRootLeakPattern } from "../scripts/lib/repo-root-pattern.mjs";
 
 test("a short root like /app does not match unrelated URL or path segments", () => {
   const pattern = buildRepoRootLeakPattern("/app");
@@ -153,6 +153,103 @@ test("a repeated probe does not skip later matches (no sticky/global state)", ()
   assert.equal(pattern.test('"https://json-schema.org/draft/2019-09/vocab/applicator"'), false);
   assert.equal(pattern.test('"/app/src/leak.ts"'), true);
   assert.equal(pattern.test('"https://json-schema.org/draft/2019-09/vocab/applicability"'), false);
+});
+
+test("filesystem roots are rejected with an explanation instead of silently disabling the leak check (2026-10-17)", () => {
+  const filesystemRoots = [
+    ["/", "POSIX"],
+    ["//", "POSIX"],
+    ["///", "POSIX"],
+    ["/./", "normalized POSIX"],
+    ["/alpha/..", "normalized POSIX"],
+    ["/a/../..", "normalized POSIX"],
+    ["C:\\", "drive"],
+    ["C:", "drive"],
+    ["C:/", "drive"],
+    ["c:\\", "drive"],
+    ["C:\\\\", "drive (repeated separators)"],
+    ["c:/./", "normalized drive"],
+    ["C:/alpha/..", "normalized drive"],
+    ["\\\\?\\C:\\", "extended drive"],
+    ["\\\\?\\C:/", "extended drive"],
+    ["\\\\.\\C:\\", "device drive"],
+    ["\\\\server\\share", "share"],
+    ["\\\\server\\share\\", "share"],
+    ["\\\\server\\share\\repo\\..", "normalized share"],
+    ["\\\\?\\UNC\\server\\share", "extended share"],
+  ] as const;
+  for (const [root, kind] of filesystemRoots) {
+    assert.throws(
+      () => buildRepoRootLeakPattern(root),
+      (error: unknown) => {
+        assert.ok(error instanceof Error, `${kind} root ${JSON.stringify(root)} must be rejected with an Error`);
+        assert.match(error.message, /filesystem root/u, "the rejection must say it is a filesystem root");
+        assert.match(error.message, /false positive/u, "the rejection must explain why the check is meaningless");
+        assert.ok(error.message.includes(JSON.stringify(root)), "the rejection must name the rejected input");
+        if (kind.startsWith("normalized")) {
+          assert.match(error.message, /lexically equivalent/u, `normalized spelling ${JSON.stringify(root)} must say which root it collapses to`);
+        }
+        return true;
+      },
+      `${kind} root ${JSON.stringify(root)} must be rejected`,
+    );
+  }
+  // Non-string and blank inputs are refused for the same reason: no silent skip.
+  for (const invalid of [undefined, null, 0, "", "   "]) {
+    assert.throws(() => buildRepoRootLeakPattern(invalid as string), /non-empty repository root/u, `invalid root ${JSON.stringify(invalid)} must be refused`);
+  }
+});
+
+test("roots one level below a filesystem root keep building usable patterns", () => {
+  const nearRoots = [
+    "/app",
+    "/home/开发者",
+    "/a/b/../c",
+    "C:\\Program Files\\Bridge Dev (x86)",
+    "C:\\repo",
+    "C:\\repo\\..\\repo2",
+    "D:\\x",
+    "\\\\server\\share\\repo",
+    "\\\\server\\share\\repo\\..\\repo2",
+    "\\\\?\\C:\\repo",
+    "E:/Programs/example repository",
+  ];
+  for (const root of nearRoots) {
+    let pattern: RegExp | undefined;
+    assert.doesNotThrow(() => { pattern = buildRepoRootLeakPattern(root); }, `root ${JSON.stringify(root)} is a checkout path and must build`);
+    assert.ok(pattern instanceof RegExp);
+    if (root === "D:\\x") {
+      assert.equal(pattern.test('"D:\\\\x\\\\src\\\\leak.ts"'), true, "a one-level drive path still detects its own leaks");
+      assert.equal(pattern.test('"D:\\\\y\\\\src\\\\leak.ts"'), false, "and still ignores sibling directories");
+    }
+  }
+  // Sanity: the guard is exported so hosts can share the exact semantics.
+  assert.doesNotThrow(() => assertNotFilesystemRoot("/app"));
+  assert.throws(() => assertNotFilesystemRoot("/"), /filesystem root/u);
+  assert.throws(() => assertNotFilesystemRoot("/alpha/.."), /lexically equivalent/u);
+});
+
+test("an HTTP URL whose host equals a short root is not a development-path leak (2026-10-17)", () => {
+  const pattern = buildRepoRootLeakPattern("/app");
+  for (const url of [
+    '"https://app/config"',
+    '"http://app/x"',
+    '"https://app.example/config"',
+    '"https://app#fragment"',
+  ]) {
+    assert.equal(pattern.test(url), false, `an ordinary URL must not be flagged: ${url}`);
+    pattern.lastIndex = 0;
+  }
+  // The genuine references on the same short root stay flagged.
+  for (const leak of [
+    '"/app/src/main.ts"',
+    JSON.stringify("file:///app/src/main.ts"),
+    '"// /app/src/leak.ts\n"',
+    '"/app"',
+  ]) {
+    assert.equal(pattern.test(leak), true, `a genuine reference must stay flagged: ${leak}`);
+    pattern.lastIndex = 0;
+  }
 });
 
 /**

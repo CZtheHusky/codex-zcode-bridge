@@ -305,7 +305,21 @@ export class TaskStore {
       this.assertWorkerAttempt(taskId, attempt);
       this.#writeJsonAtomic(path.join(this.taskDir(taskId), "result.json"), result);
       const current = this.readStatus(taskId);
-      this.#writeJsonAtomic(path.join(this.taskDir(taskId), "status.json"), { ...current, ...patch, task_id: taskId, attempt, updated_at: new Date().toISOString() });
+      // ADR-009 / review-round-1 R1 (worker-commit addendum): the worker's
+      // final commit always records its result, but while a cleanup failure
+      // is latched it can NEVER dissolve it or overwrite its evidence — no
+      // matter whether the patch clears, re-asserts, or omits
+      // cleanup_unverified, and no matter what error text it carries. The
+      // worker's own failure detail stays available in result.json; only a
+      // manager-verified, scan-gated release clears the latch.
+      let effective = patch;
+      if (current.cleanup_unverified === true) {
+        effective = { ...patch, cleanup_unverified: true };
+        if (typeof current.error === "string" && current.error.includes("[cleanup-members:")) {
+          effective = { ...effective, error: current.error };
+        }
+      }
+      this.#writeJsonAtomic(path.join(this.taskDir(taskId), "status.json"), { ...current, ...effective, task_id: taskId, attempt, updated_at: new Date().toISOString() });
     });
   }
 

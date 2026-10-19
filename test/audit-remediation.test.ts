@@ -28,7 +28,18 @@ test("cooperative cancellation waits for the verified worker result without a se
     await fx.manager.createTask(fx.makeTask());
     const pid = fx.spawned[0]!.pid;
     const finish = async () => {
-      await delay(40);
+      // Coordinate on the manager's persisted intent instead of a fixed
+      // delay. What was observed in the Linux24 full-suite failure is only
+      // the stale/terminal rejection at 104ms TAP duration; a delayed
+      // delivery is one possible mechanism (demonstrated by the 600ms
+      // diagnostic probe), not the proven original cause. Coordinating on
+      // the cancel_requested record keeps the worker commit causally after
+      // the manager's intent within this test's bounded timeout; the 5ms
+      // poll is evented coordination, not a timing guarantee about the
+      // manager's 500ms real-time window.
+      const deadline = Date.now() + 5_000;
+      while (fx.store.readStatus("task_1").cancel_requested !== true && Date.now() < deadline) await delay(5);
+      assert.equal(fx.store.readStatus("task_1").cancel_requested, true, "the manager must record its cancellation intent before the worker result can be waited for");
       const result = buildTaskResult({ task: fx.makeTask(), attempt: 1, startedAt: null, finishedAt: new Date().toISOString(), outcome: null, cancelled: true, sessionId: "cooperative-session" });
       fx.store.commitWorkerResult("task_1", 1, result, { status: "cancelled", worker_pid: null, zcode_pid: null });
       fx.pidsAlive.delete(pid);
@@ -38,6 +49,32 @@ test("cooperative cancellation waits for the verified worker result without a se
     await finishing;
     assert.deepEqual(fx.terminateCalls, []);
     assert.equal((await fx.manager.getResult("task_1")).session_id, "cooperative-session");
+  } finally { await fx.cleanup(); }
+});
+
+test("a worker result arriving after the manager's verified cancellation is stale and cannot replace it", async () => {
+  // Boundary pin for the same fixture family. A fixed timer cannot place the
+  // worker commit after the manager's terminal result (Codex counterexample:
+  // scheduling 600ms before cancelTask still landed inside the 500ms window
+  // when cancellation started 188ms later). Instead the manager's verified
+  // cancellation is awaited to completion first, and only then is the worker-
+  // side commit attempted — deterministically stale by contract: rejected,
+  // exactly one termination, no second one, and the manager's result stands.
+  const fx = await makeManagerFixture();
+  try {
+    await fx.manager.createTask(fx.makeTask());
+    const pid = fx.spawned[0]!.pid;
+    const workerPidKeptAlive = () => fx.pidsAlive.has(pid);
+    assert.equal(workerPidKeptAlive(), true, "the fake worker starts alive so the manager must go through its cooperative-then-terminate path");
+    assert.equal((await fx.manager.cancelTask("task_1")).status, "cancelled");
+    assert.deepEqual(fx.terminateCalls, [pid], "the worker outlived the cooperative window fixture-side, so exactly one verified termination happened");
+    assert.equal(fx.pidsAlive.has(pid), false, "the terminated worker is no longer considered alive");
+    // The worker-side commit happens strictly AFTER the manager's terminal
+    // result; it must be rejected as stale and never replace that result.
+    const result = buildTaskResult({ task: fx.makeTask(), attempt: 1, startedAt: null, finishedAt: new Date().toISOString(), outcome: null, cancelled: true, sessionId: "late-session" });
+    assert.throws(() => fx.store.commitWorkerResult("task_1", 1, result, { status: "cancelled", worker_pid: null, zcode_pid: null }), /stale or terminal worker attempt rejected/);
+    assert.equal((await fx.manager.getResult("task_1")).session_id, null, "the manager's verified cancellation result stands over the late worker commit");
+    assert.deepEqual(fx.terminateCalls, [pid], "no second termination was issued");
   } finally { await fx.cleanup(); }
 });
 
@@ -61,10 +98,12 @@ test("a taskkill exit race requires a verified terminal result and dead recorded
           })();
           throw new Error("taskkill raced process exit");
         } });
-      if (cleanupFailed) {
-        await assert.rejects(manager.cancelTask("task_1"), /termination.*could not be verified/);
-        assert.equal(fx.store.readStatus("task_1").cleanup_unverified, true);
-      } else assert.equal((await manager.cancelTask("task_1")).status, "cancelled");
+      // ADR-009: a termination failure propagates regardless of the worker
+      // result arriving meanwhile — root exit never replaces verified tree
+      // cleanup, so both variants keep occupancy (the RED-C swallow shape).
+      await assert.rejects(manager.cancelTask("task_1"), /could not be verified/);
+      assert.equal(fx.store.readStatus("task_1").cleanup_unverified, true);
+      assert.equal(fx.store.readStatus("task_1").status, "running");
       await finishing;
     } finally { manager?.dispose(); await fx.cleanup(); }
   }
@@ -117,6 +156,9 @@ interface CleanupRaceFixture {
   runtimePid: number;
   workspaceDir: string;
   setTerminate: (impl: TerminateProcessTree) => void;
+  /** Recorded-tree claimant scans requested by the manager (ADR-009). */
+  scanCalls: Array<Array<{ pid: number; fingerprint: string | null }>>;
+  setScanResult: (result: { clean: boolean; livePids: readonly number[] } | Error) => void;
   dispose: () => Promise<void>;
 }
 
@@ -130,10 +172,17 @@ async function makeCleanupRaceFixture(options: { persistIdentity?: boolean } = {
   const probe = new ScriptedProbe();
   const pidsAlive = new Set<number>();
   const terminateCalls: number[] = [];
+  const scanCalls: Array<Array<{ pid: number; fingerprint: string | null }>> = [];
   const workerPid = 22696;
   const runtimePid = 26188;
+  let scanResult: { clean: boolean; livePids: readonly number[] } | Error = { clean: true, livePids: [] };
   let terminateImpl: TerminateProcessTree = async () => {
     throw new Error("the test must install a terminate script before cancelling");
+  };
+  const verifyTreeClean = async (targets: readonly { pid: number; fingerprint: string | null }[]) => {
+    scanCalls.push([...targets]);
+    if (scanResult instanceof Error) throw scanResult;
+    return scanResult;
   };
   const manager = new BridgeTaskManager({
     store,
@@ -147,6 +196,7 @@ async function makeCleanupRaceFixture(options: { persistIdentity?: boolean } = {
       terminateCalls.push(pid);
       return terminateImpl(pid, options);
     },
+    verifyTreeClean,
     probe: probe as unknown as ProcessProbe,
     pollIntervalMs: 0,
   });
@@ -176,6 +226,8 @@ async function makeCleanupRaceFixture(options: { persistIdentity?: boolean } = {
     runtimePid,
     workspaceDir,
     setTerminate: (impl) => { terminateImpl = impl; },
+    scanCalls,
+    setScanResult: (result) => { scanResult = result; },
     dispose: async () => {
       manager.dispose();
       await removeTempDir(dataRoot);
@@ -184,11 +236,12 @@ async function makeCleanupRaceFixture(options: { persistIdentity?: boolean } = {
   };
 }
 
-test("a natural exit between the cancel probe and taskkill resolves cleanup as an idempotent success", async () => {
+test("a termination failure stays occupied; a later cancel releases only after probes AND the recorded-tree scan", async () => {
   const fx = await makeCleanupRaceFixture();
   try {
-    // Both recorded processes exit naturally while taskkill is in flight;
-    // taskkill then reports the runtime pid as not found and exits non-zero.
+    // Both recorded processes exit naturally while the terminator is in
+    // flight and it reports failure. ADR-009: the failure is never cleared
+    // by executor-only exit evidence — the first cancel keeps occupancy.
     fx.setTerminate(async (pid) => {
       fx.probe.set(pid, "exited", "pid_absent");
       fx.probe.set(fx.workerPid, "exited", "pid_absent");
@@ -196,17 +249,26 @@ test("a natural exit between the cancel probe and taskkill resolves cleanup as a
       fx.pidsAlive.delete(fx.workerPid);
       throw new Error(`taskkill: 没有找到进程 ${String(pid)}。`);
     });
+    await assert.rejects(fx.manager.cancelTask("task_1"), /could not be verified/);
+    let persisted = fx.store.readStatus("task_1");
+    assert.equal(persisted.status, "running", "the tree failure keeps the task occupied");
+    assert.equal(persisted.cleanup_unverified, true);
+    // The retry sees both executors conclusively exited; nothing is
+    // signalled again, and the release is gated by the read-only claimant
+    // scan over the recorded pids.
     const status = await fx.manager.cancelTask("task_1");
     assert.equal(status.status, "cancelled");
-    const persisted = fx.store.readStatus("task_1");
-    assert.equal(persisted.cleanup_unverified ?? false, false, "the probe-verified race clears the flag");
+    persisted = fx.store.readStatus("task_1");
+    assert.equal(persisted.cleanup_unverified ?? false, false, "the scan-gated release clears the flag");
     assert.equal(persisted.zcode_pid, null);
-    assert.deepEqual(fx.terminateCalls, [fx.runtimePid], "the exited worker pid must never be signalled");
+    assert.deepEqual(fx.terminateCalls, [fx.runtimePid], "only the alive-at-probe runtime was ever signalled; the exited retry probes and scans instead");
+    assert.equal(fx.scanCalls.length, 1, "the retry release consulted the recorded-tree scan once");
+    assert.ok(fx.scanCalls[0]!.some((t) => t.pid === fx.runtimePid), "the recorded runtime pid is scanned");
     assert.equal((await fx.manager.getResult("task_1")).status, "cancelled");
   } finally { await fx.dispose(); }
 });
 
-test("legacy cleanup without executor identities uses the probe to resolve an exited-PID race", async () => {
+test("legacy cleanup without executor identities releases through the same scan gate", async () => {
   const fx = await makeCleanupRaceFixture({ persistIdentity: false });
   try {
     assert.equal(fx.store.readExecutorIdentity("task_1", 1), null);
@@ -217,10 +279,36 @@ test("legacy cleanup without executor identities uses the probe to resolve an ex
       fx.pidsAlive.delete(fx.workerPid);
       throw new Error(`taskkill: 没有找到进程 ${String(pid)}。`);
     });
+    await assert.rejects(fx.manager.cancelTask("task_1"), /could not be verified/);
+    assert.equal(fx.store.readStatus("task_1").cleanup_unverified, true);
     const status = await fx.manager.cancelTask("task_1");
     assert.equal(status.status, "cancelled");
     assert.equal(fx.store.readStatus("task_1").cleanup_unverified ?? false, false);
     assert.equal(fx.store.readStatus("task_1").zcode_pid, null);
+    assert.equal(fx.scanCalls.length, 1);
+  } finally { await fx.dispose(); }
+});
+
+test("a scan that still observes live claimants keeps the retry occupied", async () => {
+  const fx = await makeCleanupRaceFixture();
+  try {
+    fx.setTerminate(async (pid) => {
+      fx.probe.set(pid, "exited", "pid_absent");
+      fx.probe.set(fx.workerPid, "exited", "pid_absent");
+      fx.pidsAlive.delete(pid);
+      fx.pidsAlive.delete(fx.workerPid);
+      throw new Error("terminator failed");
+    });
+    await assert.rejects(fx.manager.cancelTask("task_1"), /could not be verified/);
+    fx.setTerminate(async () => { throw new Error("unreachable: nothing is alive to terminate"); });
+    fx.setScanResult({ clean: false, livePids: [31_337] });
+    await assert.rejects(fx.manager.cancelTask("task_1"), /still alive/);
+    const persisted = fx.store.readStatus("task_1");
+    assert.equal(persisted.status, "running");
+    assert.equal(persisted.cleanup_unverified, true);
+    fx.setScanResult({ clean: true, livePids: [] });
+    const status = await fx.manager.cancelTask("task_1");
+    assert.equal(status.status, "cancelled");
   } finally { await fx.dispose(); }
 });
 
@@ -285,7 +373,9 @@ test("a cleanup race that proves only the runtime exited keeps the occupation wh
       fx.probe.set(fx.workerPid, "alive", "pid_and_fingerprint_match");
       throw new Error(`taskkill: 没有找到进程 ${String(pid)}。`);
     });
-    await assert.rejects(fx.manager.cancelTask("task_1"), /worker alive/);
+    // ADR-009: the terminate failure itself propagates; the worker-alive
+    // evidence only keeps occupancy (it never clears a known failure).
+    await assert.rejects(fx.manager.cancelTask("task_1"), /could not be verified/);
     const persisted = fx.store.readStatus("task_1");
     assert.equal(persisted.status, "running");
     assert.equal(persisted.cleanup_unverified, true);

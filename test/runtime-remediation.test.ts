@@ -9,7 +9,7 @@ import { TaskStore } from "../src/store/task-store.js";
 import { runWorkerTask } from "../src/worker/run-task.js";
 import { BridgeTaskManager } from "../src/manager/task-manager.js";
 import { DirectWorkspaceProvider } from "../src/workspace/direct-provider.js";
-import { terminateProcessTree } from "../src/adapters/process-spawn.js";
+import { captureSpawnGenerationIdentity, createPlatformProbe, terminateProcessTree } from "../src/adapters/process-spawn.js";
 import { ZCodeModelSettings } from "../src/runtime/model-settings.js";
 import { runtimeFixture } from "./runtime-fixture.js";
 import { makeTask, makeWorkspace } from "./helpers.js";
@@ -99,10 +99,20 @@ test("a real worker delivers a permission reply and exits; a continuation gets a
         assert.equal(exit, 0, stderr);
         assert.equal(store.readResult("task_1")?.status, "completed");
         priorId = id;
-      } finally { if (child.exitCode === null && child.signalCode === null && child.pid) await terminateProcessTree(child.pid); }
+      } finally { if (child.exitCode === null && child.signalCode === null && child.pid) await terminateFixtureChild(child); }
     }
   } finally { manager.dispose(); await fixture.cleanup(); }
 });
+
+/** ADR-009: holds the ORIGINAL ChildProcess. The shared capture re-verifies
+ * the spawn generation after every await (exit state, not the close flag),
+ * so a fingerprint read after an exit-and-recycle race is discarded and the
+ * Windows terminator then refuses to signal. */
+async function terminateFixtureChild(child: import("node:child_process").ChildProcess): Promise<void> {
+  if (child.pid === undefined) return;
+  const identity = await captureSpawnGenerationIdentity(child, createPlatformProbe());
+  await terminateProcessTree(child.pid, { expectedRootFingerprint: identity?.fingerprint ?? null, killWaitMs: 5_000 });
+}
 
 test("real worker reaches its 60-second timeout and exits with an unanswered interaction", { timeout: 80_000 }, async () => {
   const fixture = await runtimeFixture({ interaction: true });
@@ -119,7 +129,7 @@ test("real worker reaches its 60-second timeout and exits with an unanswered int
     assert.equal(store.readStatus("task_1").worker_pid, null);
     assert.equal(store.readStatus("task_1").zcode_pid, null);
   } finally {
-    if (child.exitCode === null && child.signalCode === null && child.pid) await terminateProcessTree(child.pid);
+    if (child.exitCode === null && child.signalCode === null && child.pid) await terminateFixtureChild(child);
     await fixture.cleanup();
   }
 });

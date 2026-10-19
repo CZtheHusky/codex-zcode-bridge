@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { ZCodeRuntimeConfig } from "../src/interfaces.js";
-import { validReport } from "./helpers.js";
+import { TEMP_TREE_REMOVE_OPTIONS, validReport } from "./helpers.js";
 
 export async function runtimeFixture(options: { interaction?: boolean; replay?: boolean; output?: string; fail?: boolean; cancel?: boolean } = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "bridge-regression-"));
@@ -39,5 +39,5 @@ export async function runtimeFixture(options: { interaction?: boolean; replay?: 
   const env = { ...process.env, HOME: home, USERPROFILE: home };
   for (const key of Object.keys(env)) if (key.startsWith("ZCODE_")) delete env[key as keyof typeof env];
   Object.assign(env, { ZCODE_BRIDGE_NODE: process.execPath, ZCODE_BRIDGE_ZCODE_CJS: entrypoint, ZCODE_BUILTIN_PROVIDER_CONFIG_FILE: builtin, ZCODE_PERSONAL_PROVIDER_CONFIG_FILE: personal, ZCODE_HOME: path.join(home, ".zcode"), ZCODE_BRIDGE_DATA_DIR: root, ZCODE_BRIDGE_MODE: "build" });
-  return { root, home, log, config, env, host: { name: "test-host-bridge", settingsDirectory }, cleanup: () => rm(root, { recursive: true, force: true }) };
+  return { root, home, log, config, env, host: { name: "test-host-bridge", settingsDirectory }, cleanup: () => rm(root, { recursive: true, force: true, ...TEMP_TREE_REMOVE_OPTIONS }) };
 }
