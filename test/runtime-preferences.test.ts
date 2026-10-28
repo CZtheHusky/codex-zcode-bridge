@@ -8,6 +8,8 @@ import { resolveSessionPreferences } from "../src/runtime/session-preferences.js
 
 test("execution mode defaults to yolo and build can be selected explicitly", () => {
   assert.equal(resolveSessionPreferences(undefined, {}).mode, "yolo");
+  assert.equal(resolveSessionPreferences(undefined, { ZCODE_BRIDGE_MODE: "" }).mode, "yolo");
+  assert.equal(resolveSessionPreferences(undefined, { ZCODE_BRIDGE_MODE: "   " }).mode, "yolo");
   assert.equal(resolveSessionPreferences(undefined, { ZCODE_BRIDGE_MODE: "build" }).mode, "build");
   assert.equal(resolveSessionPreferences(undefined, { ZCODE_BRIDGE_MODE: "yolo" }).mode, "yolo");
 });

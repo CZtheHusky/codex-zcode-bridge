@@ -164,7 +164,7 @@ export class ZCodeModelSettings {
         }
       }
 
-      const configuredMode = runtimeEnv["ZCODE_BRIDGE_MODE"]?.trim() ?? "build";
+      const configuredMode = runtimeEnv["ZCODE_BRIDGE_MODE"]?.trim() || "yolo";
       const mode: ZCodeSessionMode = (ZCODE_SESSION_MODES as readonly string[]).includes(configuredMode)
         ? configuredMode as ZCodeSessionMode
         : "build";
@@ -509,7 +509,7 @@ async function modelCatalogSourceFingerprint(config: ZCodeRuntimeConfig, env: No
     digest.update(await readFile(file));
   }
   const entry = await stat(config.zcodeEntrypoint);
-  digest.update(JSON.stringify({ entrypoint: config.zcodeEntrypoint, size: entry.size, mtimeMs: entry.mtimeMs, mode: env.ZCODE_BRIDGE_MODE ?? "build" }));
+  digest.update(JSON.stringify({ entrypoint: config.zcodeEntrypoint, size: entry.size, mtimeMs: entry.mtimeMs, mode: env.ZCODE_BRIDGE_MODE?.trim() || "yolo" }));
   const account = buildAccountProviderPayload(config);
   if (account) digest.update(JSON.stringify({ providers: account.providers, states: account.states, builtinRevision: account.basedOnZCodeBuiltinRevision }));
   return digest.digest("hex");

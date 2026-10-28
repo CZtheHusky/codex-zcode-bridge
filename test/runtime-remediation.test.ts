@@ -164,6 +164,29 @@ test("real worker reaches its 60-second timeout and exits with an unanswered int
   }
 });
 
+test("model catalog uses yolo by default and shares its cache with explicit yolo while respecting build", async () => {
+  const fixture = await runtimeFixture();
+  try {
+    const env: NodeJS.ProcessEnv = { ...fixture.env };
+    delete env["ZCODE_BRIDGE_MODE"];
+    const settings = new ZCodeModelSettings(env, { homeDir: fixture.home, host: fixture.host });
+    assert.equal((await settings.listModels(fixture.root)).cache_status, "refreshed");
+    let requests = (await readFile(fixture.log, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(requests.find((request) => request.method === "session/create").params.mode, "yolo");
+    const initialLog = await readFile(fixture.log, "utf8");
+    for (const mode of ["yolo", "", "   "]) {
+      env["ZCODE_BRIDGE_MODE"] = mode;
+      assert.equal((await settings.listModels(fixture.root)).cache_status, "fresh");
+      assert.equal(await readFile(fixture.log, "utf8"), initialLog);
+    }
+    env["ZCODE_BRIDGE_MODE"] = "build";
+    assert.equal((await settings.listModels(fixture.root)).cache_status, "refreshed");
+    requests = (await readFile(fixture.log, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.deepEqual(requests.filter((request) => request.method === "session/create").map((request) => request.params.mode), ["yolo", "build"]);
+    assert.equal(requests.some((request) => request.method === "session/send"), false);
+  } finally { await fixture.cleanup(); }
+});
+
 test("host-specific defaults and cache remain isolated, preserve unknown settings, and refresh on provider change", async () => {
   const fixture = await runtimeFixture();
   try {

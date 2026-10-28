@@ -28350,7 +28350,7 @@ var ZCodeModelSettings = class {
           throw new BridgeError("zcode_nonzero_exit", `Account provider synchronization failed: ${error2 instanceof Error ? error2.message : String(error2)}`, { cause: error2 });
         }
       }
-      const configuredMode = runtimeEnv["ZCODE_BRIDGE_MODE"]?.trim() ?? "build";
+      const configuredMode = runtimeEnv["ZCODE_BRIDGE_MODE"]?.trim() || "yolo";
       const mode = ZCODE_SESSION_MODES.includes(configuredMode) ? configuredMode : "build";
       const snapshot = asRecord3(await client.request("session/create", {
         workspace: { workspacePath, workspaceKey: workspacePath },
@@ -28689,7 +28689,7 @@ async function modelCatalogSourceFingerprint(config2, env) {
     digest.update(await readFile2(file));
   }
   const entry = await stat(config2.zcodeEntrypoint);
-  digest.update(JSON.stringify({ entrypoint: config2.zcodeEntrypoint, size: entry.size, mtimeMs: entry.mtimeMs, mode: env.ZCODE_BRIDGE_MODE ?? "build" }));
+  digest.update(JSON.stringify({ entrypoint: config2.zcodeEntrypoint, size: entry.size, mtimeMs: entry.mtimeMs, mode: env.ZCODE_BRIDGE_MODE?.trim() || "yolo" }));
   const account = buildAccountProviderPayload(config2);
   if (account) digest.update(JSON.stringify({ providers: account.providers, states: account.states, builtinRevision: account.basedOnZCodeBuiltinRevision }));
   return digest.digest("hex");
