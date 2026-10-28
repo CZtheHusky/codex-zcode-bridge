@@ -1,7 +1,9 @@
 # 文档索引 / Documentation
 
 > Status: AUTHORITATIVE（仅指本索引）
-> Last updated: 2026-10-18
+> Last updated: 2026-10-28
+> Last verified: 2026-10-28，核对本次修改文档的调度路由、额度诊断与状态标记；离线运行验证范围见 ADR-010，另已核对真实 ZCode/当前 App 消息送达与 Codex 独立验收；新版调度空闲聊天新轮次仍未验证。
+> Verified against: 0e74ee1c64b179752a24317574916a98c77a5ef1 + 当前 working tree（ADR-010 调度与 ADR-011 额度诊断）。
 
 英文使用者从 [README.md](../README.md) 开始。技术文档为中文。本文是文档路由：先看状态等级，再按读者路径选文档。
 
@@ -46,16 +48,16 @@ English readers start at [README.md](../README.md). This index is bilingual; the
 
 | 文档 | 语言 | 最后更新 | 最后核对 |
 |---|---|---|---|
-| [README.md](../README.md) | en | 2026-10-05 | 未记录 |
+| [README.md](../README.md) | en | 2026-10-28 | 调度静态核对 + systemd 离线闭环；真实消息送达/独立验收；空闲新轮次未验证 |
 | [README.zh-CN.md](../README.zh-CN.md) | zh | 2026-10-03 | 未记录 |
-| [PROJECT_STATE.md](PROJECT_STATE.md) | zh | 2026-10-18 | 部分核对；详见文档顶部 |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | zh | 2026-10-18 | 部分核对；详见文档顶部 |
-| [INTERFACES.md](INTERFACES.md) | zh | 2026-10-14 | 部分核对；详见文档顶部 |
-| [SHARED_CORE.md](SHARED_CORE.md) | zh | 2026-10-06 | 未记录 |
-| [ZCODE_RUNTIME.md](ZCODE_RUNTIME.md) | zh | 2026-10-14 | 2026-10-08，本地配置/假运行时 |
+| [PROJECT_STATE.md](PROJECT_STATE.md) | zh | 2026-10-28 | 调度静态核对 + systemd 离线闭环；详见文档顶部 |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | zh | 2026-10-28 | 调度静态核对 + systemd 离线闭环；详见文档顶部 |
+| [INTERFACES.md](INTERFACES.md) | zh | 2026-10-28 | 工具/schema 静态核对 + 离线闭环；详见文档顶部 |
+| [SHARED_CORE.md](SHARED_CORE.md) | zh | 2026-10-28 | 可选注入静态核对 + 离线闭环；详见文档顶部 |
+| [ZCODE_RUNTIME.md](ZCODE_RUNTIME.md) | zh | 2026-10-28 | 监督/环境静态核对 + 离线闭环；详见文档顶部 |
 | [plugins/codex-zcode-bridge/README.md](../plugins/codex-zcode-bridge/README.md) | zh | 2026-10-03 | 未记录 |
 | [plugins/codex-zcode-bridge/SECURITY.md](../plugins/codex-zcode-bridge/SECURITY.md) | zh + en | 2026-10-03 | 未记录 |
-| [plugins/codex-zcode-bridge/skills/zcode-bridge/SKILL.md](../plugins/codex-zcode-bridge/skills/zcode-bridge/SKILL.md) | zh | 2026-10-08 | 2026-10-08，本地源码/合同 |
+| [plugins/codex-zcode-bridge/skills/zcode-bridge/SKILL.md](../plugins/codex-zcode-bridge/skills/zcode-bridge/SKILL.md) | zh | 2026-10-28 | 调度/验收静态核对 + 离线闭环 |
 
 `最后核对` 表示上一次有人把文档内容与代码对照的日期及范围；标记为未记录的条目仍缺少核对证据。新建和修改文档时必须填写，否则该文档只能算"最后更新"，不能算"已验证"。本地回归不代表真实 provider 或长期运行通过。
 
@@ -63,7 +65,7 @@ English readers start at [README.md](../README.md). This index is bilingual; the
 
 | 文档 | 日期 | 说明 |
 |---|---|---|
-| [decisions/README.md](decisions/README.md) | 2026-10-08 | 决策索引 |
+| [decisions/README.md](decisions/README.md) | 2026-10-28 | 决策索引 |
 | [ADR-001](decisions/ADR-001-appserver-as-production-execution-path.md) | 2026-10-07 | Accepted：生产执行路径使用 app-server |
 | [ADR-002](decisions/ADR-002-manager-owns-task-lifecycle.md) | 2026-10-07 | Accepted：Manager 独占生命周期，worker 通过 attempt claim 入场 |
 | [ADR-003](decisions/ADR-003-execution-directory-prepared-by-host.md) | 2026-10-07 | Accepted：执行目录由调用宿主准备 |
@@ -71,6 +73,8 @@ English readers start at [README.md](../README.md). This index is bilingual; the
 | [ADR-005](decisions/ADR-005-long-session-reliability.md) | 2026-10-08 | Accepted：长会话清理、锁释放、报告修复与 provider 兼容 |
 | [ADR-006](decisions/ADR-006-provider-quota-failure-diagnostics.md) | 2026-10-14 | Accepted：安全识别并明确提示 provider 用量额度耗尽 |
 | [ADR-009](decisions/ADR-009-windows-identity-bound-tree-termination.md) | 2026-10-18 | DECISION：Windows 进程树身份绑定归属与终止（含 PR #47 返修语义） |
+| [ADR-010](decisions/ADR-010-scheduled-zcode-and-codex-wakeup.md) | 2026-10-27 | DECISION：预约执行、静默同 session 续作与原 Codex 聊天独立验收；真实消息送达/独立验收；空闲新轮次未验证 |
+| [ADR-011](decisions/ADR-011-provider-quota-diagnostic-coverage.md) | 2026-10-28 | DECISION：额度诊断字段与 RPC 错误路径，普通限流不误报耗尽 |
 | [decisions/roadmap-decisions-2026-09-27.md](decisions/roadmap-decisions-2026-09-27.md) | 2026-09-27 | 路线图与决策讨论 |
 | [decisions/reliability-repair-plan-v2-2026-10-03.md](decisions/reliability-repair-plan-v2-2026-10-03.md) | 2026-10-03 | 可靠性修复计划，含未完成项 |
 
@@ -103,6 +107,8 @@ English readers start at [README.md](../README.md). This index is bilingual; the
 | [reports/2026-10-08-long-session-reliability.md](reports/2026-10-08-long-session-reliability.md) | 长会话故障证据、本地修复、验证与未运行边界 |
 | [reports/2026-10-17-filesystem-root-guards.md](reports/2026-10-17-filesystem-root-guards.md) | Windows 锁时序重试、teardown 容错与文件系统根守卫的证据、修复与边界 |
 | [reports/2026-10-18-pr47-claimant-repair.md](reports/2026-10-18-pr47-claimant-repair.md) | PR #47 claimant 扫描 P1 返修、逐边持有证明、hold 校验与预算语义的证据与边界 |
+
+| [reports/2026-10-28-scheduled-zcode-live-validation.md](reports/2026-10-28-scheduled-zcode-live-validation.md) | 本机真实预约、自评/验收续作、进程恢复/取消与超时验证；保留空闲新轮次未验证边界 |
 
 ### 自动生成 Generated
 

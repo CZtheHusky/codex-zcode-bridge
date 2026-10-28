@@ -1,13 +1,37 @@
 # 当前接口与兼容边界
 
 > Status: AUTHORITATIVE
-> Last updated: 2026-10-15
-> Last verified: 2026-10-15，最新上游整合分支的验证结果见[审查说明](reports/2026-10-15-browser-and-transport-fixes.md)；旧版本实测与当前分支回归分别记录。
-> Verified against: 上游fae74e45033a50fb560c0014d1a6d60a7dc771d1 + 本分支修复；受测源码指纹见审查说明。
+> Last updated: 2026-10-28
+> Last verified: 2026-10-28，静态核对本次四个调度工具的 schema、acceptance_met 与 attempt 约束；另核对本机 systemd 255 / MCP / Bridge worker 的 8 项离线闭环实测证据（执行器和 App 接收端为 fixture、无模型调用），详见 [ADR-010](decisions/ADR-010-scheduled-zcode-and-codex-wakeup.md#当前验证边界2026-10-28)。另已完成本机真实 ZCode 自评/续作、当前 App 消息送达与 Codex 独立验收；新版调度在对话空闲时启动新轮次仍未验证，详见 ADR-010。
+> Verified against: 0e74ee1c64b179752a24317574916a98c77a5ef1 + 当前 working tree（ADR-010 调度离线实测与 ADR-011 额度诊断回归；仅上述范围）
+> Quota verification: 2026-10-28，ADR-011 白名单字段、provider 范围和 RPC 错误投影；离线协议及 worker 持久结果回归，真实额度故障 NOT RUN。
+> Prior verification: 2026-10-15，最新上游整合分支的验证结果见[审查说明](reports/2026-10-15-browser-and-transport-fixes.md)；旧版本实测与当前分支回归分别记录。
+> Prior verified against: 上游fae74e45033a50fb560c0014d1a6d60a7dc771d1 + 本分支修复；受测源码指纹见审查说明。
 
 准确类型与 schema 以 `src/interfaces.ts` 和 `src/mcp/schemas.ts` 为准。核心公共入口见 [SHARED_CORE.md](SHARED_CORE.md)。历史源码注释中的 V0.1/FROZEN 是沿革说明，不代表当前新增功能已经冻结。
 
-默认 MCP 工具：`zcode_task`、`zcode_status`、`zcode_feedback`、`zcode_result`、`zcode_continue`、`zcode_cancel`、`zcode_events`、`zcode_interaction_reply`、`zcode_doctor`、`zcode_model_catalog`、`zcode_default_model`、`zcode_set_default_model`、`zcode_clear_default_model`。实验 progress probe 需显式启用。
+共享核心的 13 个 MCP 工具：`zcode_task`、`zcode_status`、`zcode_feedback`、`zcode_result`、`zcode_continue`、`zcode_cancel`、`zcode_events`、`zcode_interaction_reply`、`zcode_doctor`、`zcode_model_catalog`、`zcode_default_model`、`zcode_set_default_model`、`zcode_clear_default_model`。实验 progress probe 需显式启用。默认 Codex stdio 宿主另装配下述四个调度工具；generic `createBridgeServer` 未传 schedule 时不会注册它们。
+
+## 预约目标工具（ADR-010）
+
+| 工具 | 输入与行为 |
+|---|---|
+| `zcode_schedule` | `{ task: TaskPackage, start_at, thread_id }`。start_at 必须为带 `Z` 或 `±HH:MM` 的 ISO 8601 datetime（含秒），thread_id 是用户授权绑定的原本机 Codex 聊天 UUID。同 task ID 的相同请求重放回执，不同请求或已存在的普通 task ID 冲突。回执含目标状态、开始时间、thread ID、监督 unit/log_path。 |
+| `zcode_schedule_status` | `{ task_id }`。分别返回 schedule、execution（派发前可为 null）、goal（attention、attempt_under_review、review）与 notifications（稳定 event_id、attempt、delivery）。 |
+| `zcode_schedule_review` | `{ task_id, attempt, accepted, feedback? }`。只验收 awaiting_review 对应的当前 attempt；拒绝须非空具体 feedback（最多 8,000 字符），继续同 session；接受须 cleanup verified，结束目标。相同判定重试重放，冲突或旧 attempt 拒绝。 |
+| `zcode_schedule_cancel` | `{ task_id }`。先持久化停止意图，再取消现有执行并验证清理；成功后停止监督单元。调用中断后 runner 恢复取消；清理失败保留 `cancel_requested=true`、目标进入 failed，以 `cancel_failed` attention 唤醒并暂停自动清理重试/续作。可显式再次取消；已接受目标拒绝取消。 |
+
+目标状态为 `scheduled` / `dispatched` / `awaiting_review` / `accepted` / `cancelled` / `failed`，与 execution 的六种状态分开。一次预约只有一个绝对开始时间及同一目标；不是周期创建新任务。首版要求支持 `--expand-environment=no` 的 Linux user systemd（254 或更新版本）与宿主提供的 Codex App pipe，不满足时调度显式报错，原 13 工具仍可用。
+
+`AgentReport.acceptance_met` / `TaskResult.acceptance_met` 是可选 boolean，普通任务可省略，字段存在但不是 boolean 仍为 invalid_agent_report。只有调度 prompt 强制要求它。completed + false 在 cleanup verified、session 已保存时静默续作；completed + true 请求 Codex 独立验收；needs_master_decision 优先交给 Codex。缺失/无效自评、失败、额度耗尽、待决策、待权限/输入与未确认清理不会当作成功或盲目重试。timeout 只有 session 已保存且清理已验证才自动续作。
+
+通知 delivery 为 `pending` / `sent` / `failed` / `superseded`，附发送次数与可选错误、重试时间。交付至少一次，回执丢失可能重复；取消意图使普通未送通知 superseded，但仍交付 `cancel_failed`；接受及旧 attempt 的未送通知也 superseded。通知仅唤醒原聊天检查权威状态，sent、completed 和自评 true 均不代表独立验收通过。正常进展与拒绝续作不通知人，只在独立验收通过或关键问题需处理时通知。
+
+调度错误包括 `SCHEDULE_INVALID`、`SCHEDULE_CONFLICT`、`SCHEDULE_NOT_FOUND`、`SCHEDULE_STATE`、`SCHEDULE_STALE_REVIEW`、`SCHEDULE_FEEDBACK_REQUIRED`、`SCHEDULE_SUPERVISOR_UNAVAILABLE`；TaskManager 错误仍保留。内部 `ContinueTaskInput.expected_attempt` 在 Manager 锁内检查，保护调度反馈的 attempt 归属，不增加普通 `zcode_continue` MCP 输入字段。
+
+App pipe 是 Observed Linux App 26.1016.61520 / codex-app-tools 0.1.6 的内部接口，无公开跨版本保证。本机真实调度、自评续作、当前 App 消息送达与 Codex 独立验收已通过；新版调度的空闲聊天新轮次仍未验证。离线与真实验证范围分别见 [ADR-010](decisions/ADR-010-scheduled-zcode-and-codex-wakeup.md#当前验证边界2026-10-28)。
+
+## 原任务合同
 
 TaskPackage 的五个数组必须存在，可为空。workspace 是绝对项目路径；worktree_path 是宿主已准备的执行目录。Bridge 不创建或删除 worktree。task_id 只能是最多 64 字符的字母数字、下划线和连字符。单 attempt timeout 范围 60,000–14,400,000 ms。
 
@@ -17,7 +41,7 @@ AgentReport 必须包含布尔型 needs_master_decision；缺失或字符串值�
 
 任务 objective、requirements、路径、验收、测试命令及续跑 feedback 不截断；完整 prompt 超过 60,000 字符会返回 TASK_INVALID。参考 context 与旧结果摘要仍有明确的截断标记，不能把安全约束只放在参考 context。
 
-zcode_events 使用单调 seq cursor、limit 1–200、wait_ms 0–25,000、raw/summary view。summary 合并可见输出时会注明压缩。公开事件只包含可见文本、工具名称与状态，以及有限的生命周期 metadata；隐藏 reasoning 和未知 usage metadata 不进入公开事件。`turn.failed` 只投影 Bridge 稳定错误码，不转发 provider 原始 RPC error；明确额度耗尽显示为 `zcode_usage_exhausted`，未识别原因仍显示为 `zcode_nonzero_exit`。订阅前记录 `snapshot.runtime.eventSeq`。live 订阅连续 10 秒没有新事件时，每 5 秒按已观测序号向 `session/events` 补拉一次，重放仍经过同样的 session、单调 runtime seq 和 turn ID 过滤；runtime 明确拒绝该方法时降级为纯 live 订阅，连续 3 次失败后同样降级，两种情况都会发出可见的 `session_event_replay_unavailable` 事件。协议变化不能只靠字符串方法名推断支持。`session/read` 未接入，原生当前状态查询仍为 NOT RUN。运行时事件先核对 session、单调 runtime seq 和可用 turn ID；存在历史事件的 session 必须观察新 turn.started 后才接受结束事件。缺少某些身份字段的旧协议仍有兼容路径，真实跨版本行为未全部验证。
+zcode_events 使用单调 seq cursor、limit 1–200、wait_ms 0–25,000、raw/summary view。summary 合并可见输出时会注明压缩。公开事件只包含可见文本、工具名称与状态，以及有限的生命周期 metadata；隐藏 reasoning 和未知 usage metadata 不进入公开事件。`turn.failed` 与 RPC 错误回复仅投影 Bridge 稳定错误码，不转发 provider 原始错误；按 [ADR-011](decisions/ADR-011-provider-quota-diagnostic-coverage.md) 读取白名单诊断字段，明确额度耗尽显示为 `zcode_usage_exhausted`，未识别原因仍显示为 `zcode_nonzero_exit`。订阅前记录 `snapshot.runtime.eventSeq`。live 订阅连续 10 秒没有新事件时，每 5 秒按已观测序号向 `session/events` 补拉一次，重放仍经过同样的 session、单调 runtime seq 和 turn ID 过滤；runtime 明确拒绝该方法时降级为纯 live 订阅，连续 3 次失败后同样降级，两种情况都会发出可见的 `session_event_replay_unavailable` 事件。协议变化不能只靠字符串方法名推断支持。`session/read` 未接入，原生当前状态查询仍为 NOT RUN。运行时事件先核对 session、单调 runtime seq 和可用 turn ID；存在历史事件的 session 必须观察新 turn.started 后才接受结束事件。缺少某些身份字段的旧协议仍有兼容路径，真实跨版本行为未全部验证。
 
 `zcode_feedback` 是独立的 `TaskFeedbackSnapshotV01` v0.1 聚合层，含 `schema_version: "0.1"`，并返回结构化 snapshot 与简洁文本。它不替代 `zcode_events`，也不改变 `TaskResult`、状态接口或已持久化记录。字段来源分为 Bridge task state（task、attempt、status、起止时间和墙钟 duration）、runtime-observed（只接受当前 attempt 规范化 `model_selected`、`model_tool_call`、`tool_status` 事件中的 allowlisted 字段）和 Agent report（仅当前 attempt 出现 `report_ready`、结果 attempt/status 匹配且结果为 `completed` 或 `waiting_for_master` 时，标记 `source: "agent_report"`）。模型不从请求或 catalog 回退；runtime model 缺失时为 `null`。`phase` 与 `progress` 固定为 `null`。activity 使用 Bridge 持久化事件时生成的 observation timestamp，语义固定为 `last_observed`；不表达工具仍在运行。交互状态固定为 `not_observed`，表示 snapshot 未确立可靠的当前交互状态，不表示历史中没有交互或没有待处理请求；原始交互事件仍由 `zcode_events` 提供。该 snapshot 不包含 runtime turn outcome 或 Bridge failure reason 字段，因此文本只显示可由 Bridge status 支持的完成/失败状态，不推断 turn 成功、目标完成或主机验收。Agent 报告中的 summary、文件、tests 与 issues 均不是 Bridge 独立验证结果。
 

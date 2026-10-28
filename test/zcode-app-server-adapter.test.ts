@@ -25,6 +25,7 @@ async function makeFakeRuntime(
   includeRequestedModel = true,
   interactionRequest = false,
   turnFailure?: unknown,
+  failureDelivery: "event" | "rpc" = "event",
 ): Promise<{ root: string; config: ZCodeRuntimeConfig; requestLog: string }> {
   const root = await mkdtemp(path.join(tmpdir(), "bridge-app-server-test-"));
   const entrypoint = path.join(root, "fake-app-server.cjs");
@@ -66,6 +67,10 @@ input.on("line", (line) => {
   } else if (message.method === "session/subscribe") {
     process.stdout.write(JSON.stringify({ id: message.id, result: {} }) + "\n");
   } else if (message.method === "session/send") {
+    if (${failureDelivery === "rpc"} && turnFailure !== null) {
+      process.stdout.write(JSON.stringify({ id: message.id, error: turnFailure }) + "\n");
+      return;
+    }
     process.stdout.write(JSON.stringify({ id: message.id, result: {} }) + "\n");
     if (${interactionRequest}) {
       for (const rpcId of ["interaction-rpc-1", "interaction-rpc-2"]) {
@@ -200,6 +205,66 @@ test("does not misclassify request rate limits or generic 429s as exhausted usag
       await rm(runtime.root, { recursive: true, force: true });
     }
   }
+});
+
+test("provider quota diagnostics survive ZCode wrappers and RPC rejection without leaking raw fields", async (t) => {
+  const privateMarker = "PRIVATE_QUOTA_CONTEXT_011";
+  const cases: Array<{ name: string; error: unknown; provider?: string; delivery?: "event" | "rpc" }> = [
+    { name: "five-hour business code with generic message", provider: "account:bigmodel-individual-coding-plan", error: { code: "1308", message: "Model request failed" } },
+    { name: "provider attribution carries the business code", error: { type: "MODEL_RATE_LIMITED", message: "Model request failed", attribution: { providerId: "account:zai-start-plan", providerErrorCode: "1316" } } },
+    { name: "Chinese five-hour detail", error: { message: "Turn execution failed", detail: "已达到 5 小时使用上限。您的限额将在稍后重置。" } },
+    { name: "underlying provider message", error: { message: "Turn execution failed", underlyingErrorMessage: "Account quota exhausted" } },
+    { name: "underlying provider detail", error: { message: "Turn execution failed", underlyingErrorDetail: "Weekly/Monthly Limit Exhausted" } },
+    { name: "credit balance error code", error: { code: "credit_balance_exhausted", message: "Model request failed" } },
+    { name: "project spend cap error code", error: { code: "project_spend_limit_exceeded", message: "Model request failed" } },
+    { name: "RPC send rejects before a turn event", delivery: "rpc", error: { code: -32603, message: "Usage limit reached for the past 5 hours" } },
+  ];
+  for (const item of cases) await t.test(item.name, async () => {
+    const error = typeof item.error === "object" && item.error !== null
+      ? { ...item.error, stack: privateMarker, metadata: { authorization: privateMarker } }
+      : item.error;
+    const runtime = await makeFakeRuntime({ providerId: item.provider ?? "provider-default", modelId: "model-default" }, true, false, error, item.delivery);
+    const events: Array<{ type: string; summary: string; details?: Record<string, unknown> }> = [];
+    try {
+      const adapter = new ZCodeAppServerAdapter({ resolver: { resolve: async () => runtime.config }, onEvent: (event) => events.push(event), timeoutMs: 10_000, childEnvBase: { PATH: process.env.PATH } });
+      const handle = await adapter.startTask({ task, workspace: makeWorkspace(runtime.root), attempt: 1 });
+      await assert.rejects(adapter.getResult(handle), (failure: unknown) => {
+        assert.ok(failure instanceof BridgeError);
+        assert.equal(failure.code, "zcode_usage_exhausted");
+        assert.match(failure.message, /不要继续工作、自动重试或续作/);
+        assert.doesNotMatch(failure.message, new RegExp(privateMarker));
+        return true;
+      });
+      assert.ok(events.some((event) => event.type === "error" && event.details?.error_code === "zcode_usage_exhausted"));
+      assert.doesNotMatch(JSON.stringify(events), new RegExp(privateMarker));
+    } finally { await rm(runtime.root, { recursive: true, force: true }); }
+  });
+});
+
+test("quota diagnostics do not infer exhaustion from rate limits, unrelated providers, or private metadata", async (t) => {
+  const cases: Array<{ name: string; error: unknown; provider?: string; delivery?: "event" | "rpc" }> = [
+    { name: "ZAI request rate limit", provider: "account:zai-start-plan", error: { code: "1302", message: "Rate limit reached for requests" } },
+    { name: "ZAI overload", provider: "account:bigmodel-individual-coding-plan", error: { code: "1305", message: "Service overloaded" } },
+    { name: "unrelated provider reuses code", error: { code: "1308", message: "Request failed" } },
+    { name: "error attribution overrides selected provider", provider: "account:bigmodel-individual-coding-plan", error: { code: "1308", message: "Request failed", attribution: { providerId: "another-provider" } } },
+    { name: "private metadata is not diagnostic input", error: { message: "Request failed", data: { error: { code: "insufficient_quota" } }, metadata: { message: "Quota exhausted" }, stack: "Quota exhausted" } },
+    { name: "fields cannot form a synthetic quota claim", error: { code: "quota", message: "exceeded" } },
+    { name: "RPC transport 429", delivery: "rpc", error: { code: 429, message: "Too many requests" } },
+  ];
+  for (const item of cases) await t.test(item.name, async () => {
+    const runtime = await makeFakeRuntime({ providerId: item.provider ?? "provider-default", modelId: "model-default" }, true, false, item.error, item.delivery);
+    const events: Array<{ type: string; summary: string; details?: Record<string, unknown> }> = [];
+    try {
+      const adapter = new ZCodeAppServerAdapter({ resolver: { resolve: async () => runtime.config }, onEvent: (event) => events.push(event), timeoutMs: 10_000, childEnvBase: { PATH: process.env.PATH } });
+      const handle = await adapter.startTask({ task, workspace: makeWorkspace(runtime.root), attempt: 1 });
+      await assert.rejects(adapter.getResult(handle), (failure: unknown) => {
+        assert.ok(failure instanceof BridgeError);
+        assert.equal(failure.code, "zcode_nonzero_exit");
+        return true;
+      });
+      assert.ok(events.every((event) => event.details?.error_code !== "zcode_usage_exhausted"));
+    } finally { await rm(runtime.root, { recursive: true, force: true }); }
+  });
 });
 
 test("lets the app-server resolve a requested model omitted from the initial catalog", async () => {

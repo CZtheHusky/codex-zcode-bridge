@@ -502,6 +502,26 @@ export class TaskStore {
     return newest;
   }
 
+  /** Pending interaction requests for the current attempt, oldest first.
+   * Public request ids are attempt-prefixed ("<attempt>:<runtime id>"), so a
+   * monitor can wake a host exactly once per still-pending request. */
+  listPendingInteractions(taskId: string, max = 16): Array<{ request_id: string; method: string; created_at: string }> {
+    const directory = path.join(this.taskDir(taskId), "interactions");
+    const prefix = `${this.readStatus(taskId).attempt}-`;
+    let entries: string[];
+    try { entries = readdirSync(directory); } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT") return [];
+      throw error;
+    }
+    const records: Array<{ request_id: string; method: string; created_at: string }> = [];
+    for (const file of entries.filter((entry) => entry.startsWith(prefix) && entry.endsWith(".json"))) {
+      const record: ZCodeInteractionRecord = JSON.parse(readFileSync(path.join(directory, file), "utf8"));
+      if (record.state === "pending") records.push({ request_id: record.request_id, method: record.method, created_at: record.created_at });
+    }
+    records.sort((a, b) => a.created_at.localeCompare(b.created_at));
+    return records.slice(0, max);
+  }
+
   // ---- B3 attempt-scoped observation snapshot (fenced writer) ----
 
   /**

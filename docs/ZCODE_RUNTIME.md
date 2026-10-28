@@ -1,9 +1,11 @@
 # ZCode 运行配置边界
 
 > Status: AUTHORITATIVE
-> Last updated: 2026-10-16
-> Last verified: 2026-10-16，独立验证 Windows/Linux worker 环境转发、Windows 自动发现及真实浏览器后端（见[修复报告](reports/2026-10-16-environment-portability-fixes.md#codex-独立验收2026-10-16)）；其余条目沿用 2026-10-15 核对范围。
-> Verified against: 0e1e319561edf94e0f0cd481ac455ec784eb19dd + 本分支 F1–F3 修复；受测产物指纹见修复报告。
+> Last updated: 2026-10-28
+> Last verified: 2026-10-28，静态核对本次 systemd runner 配置、App pipe 私有记录与环境转发边界；另核对本机 systemd 255 / MCP / Bridge worker 的 8 项离线闭环实测证据（执行器和 App 接收端为 fixture、无模型调用），详见 [ADR-010](decisions/ADR-010-scheduled-zcode-and-codex-wakeup.md#当前验证边界2026-10-28)。另已完成本机真实 ZCode 自评/续作、当前 App 消息送达与 Codex 独立验收；新版调度在对话空闲时启动新轮次仍未验证，详见 ADR-010。
+> Verified against: 0e74ee1c64b179752a24317574916a98c77a5ef1 + 当前 working tree（ADR-010 调度相关源码与同版 bundle 离线实测；仅上述范围）
+> Prior verification: 2026-10-16，独立验证 Windows/Linux worker 环境转发、Windows 自动发现及真实浏览器后端（见[修复报告](reports/2026-10-16-environment-portability-fixes.md#codex-独立验收2026-10-16)）；其余条目沿用 2026-10-15 核对范围。
+> Prior verified against: 0e1e319561edf94e0f0cd481ac455ec784eb19dd + 本分支 F1–F3 修复；受测产物指纹见修复报告。
 
 当前生产路径是 `node zcode.cjs app-server --stdio`，不是历史 CLI `--prompt --json`。解析入口为 `NodeRuntimeResolver`，配置项与用户设置方法见仓库 README。
 
@@ -20,3 +22,13 @@ persisted runtime-config 中已知字段只能是字符串或 null；缺文件�
 stdout 协议帧与审批持久化边界（ADR-008）：换行分隔的完整 JSON-RPC 帧单帧上限 16 MiB 原始未 trim UTF-8 字节，帧顶层必须是对象，致命帧错误锁存原因并终止当次 attempt 的协议流；turn 可见文本另有 2,000,000 字符捕获上限。审批 params 以 `JSON.stringify(params)` 紧凑序列化完整保存至 1 MiB，单事件行仍守 64,000 bytes，超限走显式预览加完整引用。这些上限是 Bridge 侧守卫，不依赖也不约束 app-server 的内部实现；真实 resume 帧（观测 2,139,927 UTF-8 bytes）在限内正常通过。
 
 2026-10-14 独立验证补充：已用本机 ZCode Desktop 3.15.1.8093 / Agent 0.16.9、GLM-5.3 / max、build 模式完成原生 browser-client 单次提交与截图、关闭验收。这次小范围 smoke 不等于全协议或跨版本认证。详情见 [独立验收](reports/2026-10-15-browser-and-transport-fixes.md)。
+
+## 预约运行环境（ADR-010）
+
+默认 Codex stdio 装配四个调度工具。`zcode_schedule` 的首版监督器只支持 Linux `systemd-run --user`：runner 使用 `Type=exec`、`Restart=on-failure`、`RestartSec=5s`、`KillMode=process` 和持久化 UUID 单元名。要求 systemd-run 支持 `--expand-environment=no`（systemd 254 起），禁止参数环境展开；本机 systemd 255 已通过下述离线闭环实测，其他版本未认证。启动回执核对 active/MainPID/cgroup；停止 runner 不代替 TaskManager 对独立 worker 的清理验证。缺可用 user systemd 时显式拒绝预约，不回退到 PTY、tmux 或 nohup；不自动开启 linger，不保证注销、关机或 App 关闭后的行为。
+
+监督标识与 `runner.log` 路径由 schedule 回执/status 返回。runner 入口在源码构建为 `dist/src/schedule/runner-main.js`，插件为 `worker/schedule-runner.mjs`；与原 `dist/bridge.mjs`、`worker/worker-main.mjs` 一起构建和校验。运行数据位于 `<dataRoot>/.schedules/`，不改变 `.tasks/` 的任务事实。
+
+`CODEX_APP_TOOLS_PIPE_PATH` 只从 MCP 宿主环境取得，写到宿主私有 `.schedules/runtime.json`，每次工具调用可刷新，runner 每次发送重新读取。它不加入 worker 环境白名单，不放进 TaskPackage 或 ZCode prompt；user systemd manager 会继承自身环境，因此 runner 经 `/usr/bin/env -i` 清空环境，再显式注入现有 worker 配置键清单、必要 host/plugin 标识，以及仅供调度宿主使用的 `XDG_RUNTIME_DIR`、`DBUS_SESSION_BUS_ADDRESS`、`ELECTRON_RUN_AS_NODE`；这三个键没有加入 ZCode worker 白名单，不能仅靠 `--setenv` 声称环境隔离。`thread_id` 由宿主显式绑定当前原聊天，不从别的进程环境推断。
+
+App pipe 使用观测到的本机 `send_message_to_thread` 协议，Linux App 26.1016.61520 / codex-app-tools 0.1.6 的历史实测不构成公开或跨版本保证。pipe 不可用时 outbox 保留错误并重试；成功回执只有交付意义，可能重复，不能证明验收通过。本机真实 systemd/ZCode/原聊天验收链路已验证至消息送达与独立接受；新版调度的空闲聊天新轮次仍未验证，见 [ADR-010](decisions/ADR-010-scheduled-zcode-and-codex-wakeup.md#当前验证边界2026-10-28)。

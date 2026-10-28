@@ -46,6 +46,8 @@ type ProgressEvent = { type: string; summary: string; details?: Record<string, u
 type ProgressSink = (event: ProgressEvent) => void;
 type JsonRecord = Record<string, unknown>;
 
+const USAGE_EXHAUSTED_MESSAGE = "ZCode 提供方明确报告用量额度已耗尽；当前执行已中断。请立即停止当前任务并告知用户；不要继续工作、自动重试或续作，等待用户确认额度恢复后再继续。";
+
 function publicUsage(value: unknown): Record<string, unknown> | null {
   if (!isRecord(value)) return null;
   const result: Record<string, unknown> = {};
@@ -1146,8 +1148,10 @@ export class ZCodeAppServerAdapter implements CodingAgentAdapter {
       clearTimeout(call.timer);
       pending.delete(id);
       if (message.error && typeof message.error === "object") {
-        const error = message.error as JsonRecord;
-        call.reject(new Error(`ZCode app-server request failed for ${call.method}${typeof error.code === "number" ? ` (code ${error.code})` : ""}`));
+        const error = asRecord(message.error);
+        call.reject(providerReportedUsageExhaustion(error, entry.selectedModelSelection?.providerId ?? null)
+          ? new BridgeError("zcode_usage_exhausted", USAGE_EXHAUSTED_MESSAGE)
+          : new Error(`ZCode app-server request failed for ${call.method}${typeof error.code === "number" ? ` (code ${error.code})` : ""}`));
       } else {
         call.resolve(message.result);
       }
@@ -1199,12 +1203,9 @@ export class ZCodeAppServerAdapter implements CodingAgentAdapter {
       if (type === "turn.failed") {
         entry.acceptingTurn = false;
         entry.turnCompletedAt = this.#now().toISOString();
-        const quotaExhausted = providerReportedUsageExhaustion(payload.error);
+        const quotaExhausted = providerReportedUsageExhaustion(payload.error, entry.selectedModelSelection?.providerId ?? null);
         const failure = quotaExhausted
-          ? new BridgeError(
-              "zcode_usage_exhausted",
-              "ZCode 提供方明确报告用量额度已耗尽；当前执行已中断。请立即停止当前任务并告知用户；不要继续工作、自动重试或续作，等待用户确认额度恢复后再继续。",
-            )
+          ? new BridgeError("zcode_usage_exhausted", USAGE_EXHAUSTED_MESSAGE)
           : new Error("ZCode turn failed");
         this.#publishSessionEvent(type, payload, entry, params, quotaExhausted ? "zcode_usage_exhausted" : "zcode_nonzero_exit");
         entry.rejectTurn(failure);
@@ -1704,20 +1705,27 @@ function asRecord(value: unknown): JsonRecord {
   return isRecord(value) ? value : {};
 }
 
-/** Classify only explicit quota-exhaustion claims from allowlisted provider fields. */
-function providerReportedUsageExhaustion(value: unknown): boolean {
+/** boundary: ADR-011 allowlists ZCode RPC diagnostic fields; never inspect arbitrary metadata. */
+function providerReportedUsageExhaustion(value: unknown, selectedProviderId: string | null): boolean {
   const error = asRecord(value);
+  const attribution = asRecord(error.attribution);
+  const codes = [error.code, error.type, attribution.providerErrorCode]
+    .filter((code): code is string => typeof code === "string")
+    .map((code) => code.slice(0, 160).toLowerCase());
+  if (codes.some((code) => [
+    "insufficient_quota", "credit_balance_exhausted", "organization_spend_limit_exceeded",
+    "project_spend_limit_exceeded", "organization_usage_limit_exceeded", "exceeded_current_quota_error",
+  ].includes(code))) return true;
+  const providerId = typeof attribution.providerId === "string" ? attribution.providerId : selectedProviderId;
+  if (providerId && /^(?:(?:account|builtin):)?(?:bigmodel|zai|zhipu)(?:$|[-:])/i.test(providerId)
+    && codes.some((code) => ["1113", "1308", "1310", "1316", "1317", "1318", "1319", "1320", "1321"].includes(code))) return true;
   const candidates = [
-    typeof value === "string" ? value : null,
-    typeof error.code === "string" ? error.code : null,
-    typeof error.type === "string" ? error.type : null,
-    typeof error.message === "string" ? error.message : null,
-  ].filter((candidate): candidate is string => candidate !== null)
-    .map((candidate) => candidate.slice(0, 2_048));
-  if (candidates.length === 0) return false;
+    value, error.code, error.type, error.message, error.detail,
+    error.underlyingErrorMessage, error.underlyingErrorDetail, attribution.providerErrorCode,
+  ].filter((candidate): candidate is string => typeof candidate === "string")
+    .map((candidate) => candidate.slice(0, 2_048).normalize("NFKC").toLowerCase());
 
-  const text = candidates.join("\n").normalize("NFKC").toLowerCase();
-  return [
+  return candidates.some((text) => [
     /\binsufficient[_\s-]+quota\b/,
     /\bquota[_\s-]+(?:(?:has[_\s-]+been)[_\s-]+)?(?:exceeded|exhausted|depleted)\b/,
     /\b(?:usage|token)[_\s-]+quota[_\s-]+(?:exceeded|exhausted|depleted)\b/,
@@ -1725,11 +1733,13 @@ function providerReportedUsageExhaustion(value: unknown): boolean {
     /\b(?:out[_\s-]+of|no[_\s-]+remaining|insufficient[_\s-]+)(?:[_\s-]+)?credits?\b/,
     /\bcredits?[_\s-]+(?:exhausted|depleted)\b/,
     /\bbilling[_\s-]+hard[_\s-]+limit[_\s-]+reached\b/,
+    /\b(?:weekly|monthly)(?:\/(?:weekly|monthly))?[_\s-]+limit[_\s-]+exhausted\b/,
     /(?:用量|额度|配额)(?:已|已经)?(?:用尽|耗尽|用完|不足)/,
     /(?:用尽|耗尽|用完|不足)(?:了)?(?:用量|额度|配额)/,
     /(?:超出|超过)(?:了)?(?:当前)?(?:用量|额度|配额)/,
     /(?:当前)?(?:用量|额度|配额)(?:已经)?(?:超出|不足)/,
-  ].some((pattern) => pattern.test(text));
+    /(?:已(?:经)?达到|已达|超出|超过)[^\n]{0,32}(?:使用|用量|消费)上限/,
+  ].some((pattern) => pattern.test(text)));
 }
 
 async function syncDesktopStatus(

@@ -10,6 +10,7 @@
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { homedir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { findPackageRoot, loadPersistedRuntimeEnvironment } from "../runtime/resolver.js";
 import { TaskStore } from "../store/task-store.js";
 import { DirectWorkspaceProvider } from "../workspace/direct-provider.js";
@@ -19,9 +20,21 @@ import { DEFAULT_TASK_TIMEOUT_MS, validateTaskTimeout } from "../runtime/task-ti
 import { runBridgeDoctor } from "../runtime/doctor.js";
 import { ZCodeModelSettings } from "../runtime/model-settings.js";
 import { codexHostProfile, validateHostProfile, type BridgeHostProfile } from "./profile.js";
-import { createWorkerSpawner } from "../manager/spawn-worker.js";
+import { createWorkerSpawner, workerEntryPath } from "../manager/spawn-worker.js";
 import { createPlatformProbe } from "../runtime/process-probe.js";
 import { SERVER_VERSION } from "../mcp/server.js";
+import { ScheduleController } from "../schedule/controller.js";
+import { ScheduleStore, schedulesRootFor } from "../schedule/store.js";
+import { createSystemdRunSupervisor } from "../schedule/supervisor.js";
+
+/** The supervised scheduler entry next to the worker bundle (plugin mode) or
+ * the compiled module tree (repo/bin mode), mirroring workerEntryPath(). */
+export function scheduleRunnerEntryPath(): string {
+  if (process.env["ZCODE_BRIDGE_PLUGIN_MODE"] === "1") {
+    return fileURLToPath(new URL("../worker/schedule-runner.mjs", import.meta.url));
+  }
+  return fileURLToPath(new URL("../schedule/runner-main.js", import.meta.url));
+}
 
 export interface DataRootResolution {
   readonly dataRoot: string;
@@ -98,12 +111,32 @@ export async function startBridge(host: BridgeHostProfile = codexHostProfile(), 
     probe: createPlatformProbe(),
   });
   const modelSettings = new ZCodeModelSettings(process.env, { host });
+  // ADR-010: the default Codex host always composes the real scheduler; a
+  // missing user systemd manager or App tools pipe fails per scheduling call
+  // while every ordinary tool keeps working.
+  const scheduleController = host.name === codexHostProfile().name ? new ScheduleController({
+    store: new ScheduleStore(schedulesRootFor(dataRoot)),
+    manager,
+    supervisor: createSystemdRunSupervisor(),
+    runnerEntryPath: scheduleRunnerEntryPath(),
+    dataRoot,
+    env: { ...runtimeEnv, ...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: "1" } : {}), ZCODE_BRIDGE_HOST_PROFILE: JSON.stringify({ ...host, workerEntryPath: host.workerEntryPath ?? workerEntryPath() }),
+      ZCODE_BRIDGE_MAX_CONCURRENT_WORKERS: String(workerLimit.maxConcurrentWorkers) },
+  }) : undefined;
+  const appPipePath = process.env["CODEX_APP_TOOLS_PIPE_PATH"]?.trim();
+  if (appPipePath) scheduleController?.noteAppPipePath(appPipePath);
   const server = createBridgeServer({
     taskManager: manager,
     doctor: () => runBridgeDoctor({ env: runtimeEnv, dataRoot, resolver: { host } }),
     modelSettings,
     serverInfo: { name: host.name, version },
     instructions: host.instructions,
+    schedule: scheduleController ? {
+      controller: scheduleController,
+      // Host-owned pipe location, re-read per call so an MCP host reconnect
+      // with a fresh CODEX_APP_TOOLS_PIPE_PATH refreshes the runner.
+      appPipeSource: () => process.env["CODEX_APP_TOOLS_PIPE_PATH"]?.trim() || null,
+    } : undefined,
   });
   const handle = serveStdio(() => server);
 

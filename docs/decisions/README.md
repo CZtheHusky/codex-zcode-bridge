@@ -1,7 +1,9 @@
 # 决策记录 / Decisions
 
 > Status: AUTHORITATIVE（仅指本索引）
-> Last updated: 2026-10-08
+> Last updated: 2026-10-28
+> Last verified: 2026-10-28，仅核对 ADR-010 / ADR-011 索引与文档链接。
+> Verified against: 0e74ee1c64b179752a24317574916a98c77a5ef1 + 当前 working tree（ADR-010 / ADR-011）。
 
 本目录保存已批准的架构决策和带日期的决策记录。决策回答"为什么这样定"，当前实现仍以 `ARCHITECTURE.md` / `INTERFACES.md` 为准。
 
@@ -30,6 +32,9 @@ ADR-001 到 ADR-003 只搬运权威文档里已经写明的结论。ADR-004 原�
 - [ADR-007](ADR-007-browser-host-rpc.md)：可选headless浏览器宿主；默认关闭，限定版本实测。
 - [ADR-008](ADR-008-session-frames-and-large-interactions.md)：会话帧与大审批输入；独立资源边界及可恢复错误。
 - [ADR-009](ADR-009-windows-identity-bound-tree-termination.md)：Windows 进程树身份绑定归属与终止；句柄事务、零容差区间归属、单调失败锁存与有界传输。
+- [ADR-010](ADR-010-scheduled-zcode-and-codex-wakeup.md)：一次预约目标、systemd user 监督、静默同 session 续作和原 Codex 聊天独立验收；App 内部 pipe 历史空闲唤醒、当前真实消息送达与空闲新轮次未验证范围分开记录。
+
+- [ADR-011](ADR-011-provider-quota-diagnostic-coverage.md)：补齐额度诊断字段与 RPC 错误路径；数字业务码限定 provider 范围，Codex 内置审批不伪装为外部审查 API。
 
 ## 命名
 

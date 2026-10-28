@@ -723,6 +723,27 @@ var init_task_store = __esm({
         }
         return newest;
       }
+      /** Pending interaction requests for the current attempt, oldest first.
+       * Public request ids are attempt-prefixed ("<attempt>:<runtime id>"), so a
+       * monitor can wake a host exactly once per still-pending request. */
+      listPendingInteractions(taskId, max = 16) {
+        const directory = path4.join(this.taskDir(taskId), "interactions");
+        const prefix = `${this.readStatus(taskId).attempt}-`;
+        let entries;
+        try {
+          entries = readdirSync(directory);
+        } catch (error2) {
+          if (error2 instanceof Error && "code" in error2 && error2.code === "ENOENT") return [];
+          throw error2;
+        }
+        const records = [];
+        for (const file of entries.filter((entry) => entry.startsWith(prefix) && entry.endsWith(".json"))) {
+          const record3 = JSON.parse(readFileSync3(path4.join(directory, file), "utf8"));
+          if (record3.state === "pending") records.push({ request_id: record3.request_id, method: record3.method, created_at: record3.created_at });
+        }
+        records.sort((a, b) => a.created_at.localeCompare(b.created_at));
+        return records.slice(0, max);
+      }
       // ---- B3 attempt-scoped observation snapshot (fenced writer) ----
       /**
        * Writes worker-owned snapshot fields. Fenced twice: the attempt must still
@@ -1586,8 +1607,8 @@ var init_build = __esm({
 
 // src/mcp/main.ts
 import { realpathSync as realpathSync2 } from "node:fs";
-import path13 from "node:path";
-import { fileURLToPath as fileURLToPath3 } from "node:url";
+import path16 from "node:path";
+import { fileURLToPath as fileURLToPath4 } from "node:url";
 
 // node_modules/@modelcontextprotocol/server/dist/chunk-Br0eD_fh.mjs
 var __create = Object.create;
@@ -1882,10 +1903,10 @@ function mergeDefs(...defs) {
 function cloneDef(schema) {
   return mergeDefs(schema._zod.def);
 }
-function getElementAtPath(obj, path14) {
-  if (!path14)
+function getElementAtPath(obj, path17) {
+  if (!path17)
     return obj;
-  return path14.reduce((acc, key) => acc?.[key], obj);
+  return path17.reduce((acc, key) => acc?.[key], obj);
 }
 function promiseAllObject(promisesObj) {
   const keys = Object.keys(promisesObj);
@@ -2225,11 +2246,11 @@ function explicitlyAborted(x, startIndex = 0) {
   }
   return false;
 }
-function prefixIssues(path14, issues) {
+function prefixIssues(path17, issues) {
   return issues.map((iss) => {
     var _a3;
     (_a3 = iss).path ?? (_a3.path = []);
-    iss.path.unshift(path14);
+    iss.path.unshift(path17);
     return iss;
   });
 }
@@ -2678,16 +2699,16 @@ function flattenError(error2, mapper = (issue2) => issue2.message) {
 }
 function formatError(error2, mapper = (issue2) => issue2.message) {
   const fieldErrors = { _errors: [] };
-  const processError = (error3, path14 = []) => {
+  const processError = (error3, path17 = []) => {
     for (const issue2 of error3.issues) {
       if (issue2.code === "invalid_union" && issue2.errors.length) {
-        issue2.errors.map((issues) => processError({ issues }, [...path14, ...issue2.path]));
+        issue2.errors.map((issues) => processError({ issues }, [...path17, ...issue2.path]));
       } else if (issue2.code === "invalid_key") {
-        processError({ issues: issue2.issues }, [...path14, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path17, ...issue2.path]);
       } else if (issue2.code === "invalid_element") {
-        processError({ issues: issue2.issues }, [...path14, ...issue2.path]);
+        processError({ issues: issue2.issues }, [...path17, ...issue2.path]);
       } else {
-        const fullpath = [...path14, ...issue2.path];
+        const fullpath = [...path17, ...issue2.path];
         if (fullpath.length === 0) {
           fieldErrors._errors.push(mapper(issue2));
         } else {
@@ -12030,9 +12051,9 @@ var rev2026Codec = {
     });
     const parsed = buildSchemas2026().RequestMetaEnvelopeSchema.safeParse(meta2);
     if (!parsed.success) for (const issue2 of parsed.error.issues) {
-      const path14 = issue2.path.map(String);
-      const key = path14.length > 0 ? path14.join(".") : "_meta";
-      if (path14.length === 1 && issues.some((existing) => existing.key === key && existing.problem === "missing")) continue;
+      const path17 = issue2.path.map(String);
+      const key = path17.length > 0 ? path17.join(".") : "_meta";
+      if (path17.length === 1 && issues.some((existing) => existing.key === key && existing.problem === "missing")) continue;
       issues.push({
         key,
         problem: issue2.message
@@ -12353,29 +12374,29 @@ var PERMITTED_X_MCP_HEADER_TYPES = /* @__PURE__ */ new Set([
 function scanXMcpHeaderDeclarations(inputSchema) {
   const declarations = [];
   const seenLower = /* @__PURE__ */ new Map();
-  const visit = (node2, path14, reachable) => {
+  const visit = (node2, path17, reachable) => {
     if (node2 === null || typeof node2 !== "object") return void 0;
     const schema = node2;
     if (X_MCP_HEADER_KEY in schema) {
-      if (!reachable || path14.length === 0) return `${pathName(path14)}: x-mcp-header is only permitted on properties statically reachable via a chain of 'properties' keys (not under items, additionalProperties, oneOf/anyOf/allOf/not, if/then/else, or $ref)`;
+      if (!reachable || path17.length === 0) return `${pathName(path17)}: x-mcp-header is only permitted on properties statically reachable via a chain of 'properties' keys (not under items, additionalProperties, oneOf/anyOf/allOf/not, if/then/else, or $ref)`;
       const raw = schema[X_MCP_HEADER_KEY];
-      if (typeof raw !== "string" || raw.length === 0) return `${pathName(path14)}: x-mcp-header MUST be a non-empty string`;
-      if (!RFC9110_TOKEN.test(raw)) return `${pathName(path14)}: x-mcp-header '${raw}' is not a valid RFC 9110 token (no spaces, control characters or HTTP delimiters)`;
+      if (typeof raw !== "string" || raw.length === 0) return `${pathName(path17)}: x-mcp-header MUST be a non-empty string`;
+      if (!RFC9110_TOKEN.test(raw)) return `${pathName(path17)}: x-mcp-header '${raw}' is not a valid RFC 9110 token (no spaces, control characters or HTTP delimiters)`;
       const type = typeof schema.type === "string" ? schema.type : void 0;
-      if (type === void 0 || !PERMITTED_X_MCP_HEADER_TYPES.has(type)) return `${pathName(path14)}: x-mcp-header is only permitted on primitive-typed properties (string, integer, boolean); got ${type ?? "<none>"}`;
+      if (type === void 0 || !PERMITTED_X_MCP_HEADER_TYPES.has(type)) return `${pathName(path17)}: x-mcp-header is only permitted on primitive-typed properties (string, integer, boolean); got ${type ?? "<none>"}`;
       const lower = raw.toLowerCase();
       const prior = seenLower.get(lower);
       if (prior !== void 0) return `x-mcp-header '${raw}' is not case-insensitively unique (also declared as '${prior}')`;
       seenLower.set(lower, raw);
       declarations.push({
-        path: path14,
+        path: path17,
         headerName: raw,
         type
       });
     }
     const properties = schema.properties;
     if (properties !== null && typeof properties === "object") for (const [key, child] of Object.entries(properties)) {
-      const fault$1 = visit(child, [...path14, key], reachable);
+      const fault$1 = visit(child, [...path17, key], reachable);
       if (fault$1 !== void 0) return fault$1;
     }
     for (const k of NON_REACHABLE_SUBSCHEMA_KEYWORDS) {
@@ -12383,7 +12404,7 @@ function scanXMcpHeaderDeclarations(inputSchema) {
       if (sub === void 0) continue;
       const branches = Array.isArray(sub) ? sub : sub !== null && typeof sub === "object" && OBJECT_VALUED_SUBSCHEMA_KEYWORDS.has(k) ? Object.values(sub) : [sub];
       for (const branch of branches) {
-        const fault$1 = visit(branch, [...path14, `<${k}>`], false);
+        const fault$1 = visit(branch, [...path17, `<${k}>`], false);
         if (fault$1 !== void 0) return fault$1;
       }
     }
@@ -12423,8 +12444,8 @@ var OBJECT_VALUED_SUBSCHEMA_KEYWORDS = /* @__PURE__ */ new Set([
   "$defs",
   "definitions"
 ]);
-function pathName(path14) {
-  return path14.length === 0 ? "<root>" : path14.join(".");
+function pathName(path17) {
+  return path17.length === 0 ? "<root>" : path17.join(".");
 }
 var HEADER_MISMATCH_ERROR_CODE = -32020;
 var INBOUND_VALIDATION_LADDER = [
@@ -12713,7 +12734,7 @@ var PROPERTY_KEYS_BY_TYPE = {
   array: shapeKeys([UntitledMultiSelectEnumSchemaSchema, TitledMultiSelectEnumSchemaSchema])
 };
 var SUPPORTED_STRING_FORMATS = new Set(StringSchemaSchema.shape.format.unwrap().options);
-function walkProperty(node2, path14, vendor, unsupported) {
+function walkProperty(node2, path17, vendor, unsupported) {
   if (!isJsonObject(node2)) return node2;
   const allowedKeys = typeof node2.type === "string" && Object.hasOwn(PROPERTY_KEYS_BY_TYPE, node2.type) ? PROPERTY_KEYS_BY_TYPE[node2.type] : void 0;
   if (allowedKeys === void 0) return node2;
@@ -12721,8 +12742,8 @@ function walkProperty(node2, path14, vendor, unsupported) {
   for (const [key, value] of Object.entries(node2)) if (allowedKeys.has(key) || isAnnotationOnlyJsonSchemaKeyword(key)) pruned[key] = value;
   else if (key === "pattern" && node2.type === "string" && typeof node2.format === "string") {
     if (!SUPPORTED_STRING_FORMATS.has(node2.format)) pruned[key] = value;
-    else if (typeof value !== "string" || !isLibraryFormatPattern(node2.format, value, vendor)) unsupported.push(`${path14}.${key}`);
-  } else unsupported.push(`${path14}.${key}`);
+    else if (typeof value !== "string" || !isLibraryFormatPattern(node2.format, value, vendor)) unsupported.push(`${path17}.${key}`);
+  } else unsupported.push(`${path17}.${key}`);
   return pruned;
 }
 function walkRequestedSchema(converted, vendor) {
@@ -12739,11 +12760,11 @@ function describeUnsupportedProperties(pruned, fallback) {
   const offenders = Object.entries(pruned.properties).filter(([, node2]) => !parseSchema(PrimitiveSchemaDefinitionSchema, node2).success).map(([name]) => `properties.${name}`);
   return offenders.length > 0 ? offenders.join(", ") : fallback;
 }
-function findDroppedConstraintPaths(original, parsed, path14 = "") {
-  if (Array.isArray(original) && Array.isArray(parsed)) return original.flatMap((item, index) => findDroppedConstraintPaths(item, parsed[index], `${path14}[${index}]`));
+function findDroppedConstraintPaths(original, parsed, path17 = "") {
+  if (Array.isArray(original) && Array.isArray(parsed)) return original.flatMap((item, index) => findDroppedConstraintPaths(item, parsed[index], `${path17}[${index}]`));
   if (!isJsonObject(original) || !isJsonObject(parsed)) return [];
   return Object.entries(original).flatMap(([key, value]) => {
-    const childPath = path14 ? `${path14}.${key}` : key;
+    const childPath = path17 ? `${path17}.${key}` : key;
     if (!Object.prototype.hasOwnProperty.call(parsed, key)) return isAnnotationOnlyJsonSchemaKeyword(key) ? [] : [childPath];
     return findDroppedConstraintPaths(value, parsed[key], childPath);
   });
@@ -16822,8 +16843,8 @@ var require_utils = /* @__PURE__ */ __commonJSMin(((exports, module) => {
     for (let i = 0; i < str.length; i++) if (str[i] === token) ind++;
     return ind;
   }
-  function removeDotSegments(path14) {
-    let input = path14;
+  function removeDotSegments(path17) {
+    let input = path17;
     const output = [];
     let nextSlash = -1;
     let len = 0;
@@ -16976,8 +16997,8 @@ var require_schemes = /* @__PURE__ */ __commonJSMin(((exports, module) => {
       wsComponent.secure = void 0;
     }
     if (wsComponent.resourceName) {
-      const [path14, query] = wsComponent.resourceName.split("?");
-      wsComponent.path = path14 && path14 !== "/" ? path14 : void 0;
+      const [path17, query] = wsComponent.resourceName.split("?");
+      wsComponent.path = path17 && path17 !== "/" ? path17 : void 0;
       wsComponent.query = query;
       wsComponent.resourceName = void 0;
     }
@@ -23117,7 +23138,8 @@ function toError(value) {
 
 // src/host/stdio.ts
 import { homedir as homedir4 } from "node:os";
-import path12 from "node:path";
+import path15 from "node:path";
+import { fileURLToPath as fileURLToPath3 } from "node:url";
 
 // src/runtime/resolver.ts
 import { accessSync, existsSync, readFileSync, statSync } from "node:fs";
@@ -23614,7 +23636,8 @@ function buildTaskResult(input) {
     files_changed: report.files_changed,
     tests: report.tests,
     issues: report.issues,
-    needs_master_decision: report.needs_master_decision
+    needs_master_decision: report.needs_master_decision,
+    ...report.acceptance_met === void 0 ? {} : { acceptance_met: report.acceptance_met }
   };
 }
 function truncate(text, maxChars) {
@@ -24186,7 +24209,7 @@ async function terminateWindowsProcessTree(pid, expectedRootTicks, killWaitMs, d
     throw new WindowsTreeCleanupError("process_tree_invalid_pid", `a positive integer PID is required, got: ${String(pid)}`);
   }
   const now = dependencies.now ?? Date.now;
-  const sleep4 = dependencies.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const sleep5 = dependencies.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const transaction = await dependencies.open();
   const killed = /* @__PURE__ */ new Map();
   const held = /* @__PURE__ */ new Map();
@@ -24252,7 +24275,7 @@ async function terminateWindowsProcessTree(pid, expectedRootTicks, killWaitMs, d
           knownPids()
         );
       }
-      await sleep4(20);
+      await sleep5(20);
     }
     succeeded = true;
     return {
@@ -26053,6 +26076,9 @@ var BridgeTaskManager = class _BridgeTaskManager {
           return { task_id: taskId, status: status.status === "running" ? "running" : "queued", created_at: status.created_at };
         }
       }
+      if (input.expected_attempt !== void 0 && input.expected_attempt !== status.attempt) {
+        throw new TaskManagerError("TASK_STATE", `Expected attempt ${input.expected_attempt}; current attempt is ${status.attempt}`);
+      }
       if (!["completed", "failed", "waiting_for_master"].includes(status.status)) {
         throw new TaskManagerError(
           "TASK_STATE",
@@ -26835,11 +26861,13 @@ var taskResultSchema = object({
     files_changed: array(string2()).optional(),
     tests: array(testReportSchema).optional(),
     issues: array(string2()).optional(),
-    needs_master_decision: boolean2().optional()
+    needs_master_decision: boolean2().optional(),
+    acceptance_met: boolean2().optional()
   }).optional(),
   usage: normalizedUsageSchema.nullable().optional(),
   model: executionProfileSchema.nullable().optional(),
-  timing: attemptTimingSchema.nullable().optional()
+  timing: attemptTimingSchema.nullable().optional(),
+  acceptance_met: boolean2().optional()
 });
 var taskProgressEventSchema = object({
   seq: number2().int().positive(),
@@ -26943,6 +26971,108 @@ var modelSelectionSchema = object({
 var defaultModelSchema = object({
   configured: boolean2(),
   model: modelSelectionSchema.nullable()
+});
+var START_AT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/u;
+var THREAD_ID_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/u;
+var zcodeScheduleInputSchema = strictObject({
+  task: zcodeTaskInputSchema,
+  start_at: string2().regex(START_AT_PATTERN, "start_at must be an ISO 8601 datetime carrying a timezone offset (Z or \xB1HH:MM)"),
+  thread_id: string2().regex(THREAD_ID_PATTERN, "thread_id must be the UUID of the original Codex chat that will receive wakeups")
+});
+var zcodeScheduleStatusInputSchema = strictObject({
+  task_id: taskIdSchema
+});
+var zcodeScheduleReviewInputSchema = strictObject({
+  task_id: taskIdSchema,
+  attempt: number2().int().positive(),
+  accepted: boolean2(),
+  feedback: string2().min(1).max(8e3).optional()
+});
+var zcodeScheduleCancelInputSchema = strictObject({
+  task_id: taskIdSchema
+});
+var scheduleSupervisorInfoSchema = object({
+  unit: string2(),
+  log_path: string2()
+});
+var scheduleGoalStatusSchema = _enum([
+  "scheduled",
+  "dispatched",
+  "awaiting_review",
+  "accepted",
+  "cancelled",
+  "failed"
+]);
+var scheduleReceiptSchema = object({
+  task_id: string2(),
+  status: scheduleGoalStatusSchema,
+  start_at: string2(),
+  thread_id: string2(),
+  created_at: string2(),
+  supervisor: scheduleSupervisorInfoSchema.nullable()
+});
+var scheduleStatusSchema = object({
+  task_id: string2(),
+  schedule: object({
+    status: scheduleGoalStatusSchema,
+    start_at: string2(),
+    thread_id: string2(),
+    created_at: string2(),
+    updated_at: string2(),
+    cancel_requested: boolean2(),
+    supervisor: scheduleSupervisorInfoSchema.nullable(),
+    failure_reason: string2().nullable()
+  }),
+  execution: object({
+    status: _enum(["queued", "running", "completed", "failed", "cancelled", "waiting_for_master"]),
+    attempt: number2().int(),
+    error_code: string2().optional(),
+    needs_master_decision: boolean2().nullable(),
+    acceptance_met: boolean2().optional()
+  }).nullable(),
+  goal: object({
+    attention: object({
+      reason: string2(),
+      attempt: number2().int(),
+      event_id: string2(),
+      set_at: string2(),
+      detail: string2().optional()
+    }).nullable(),
+    attempt_under_review: number2().int().nullable(),
+    review: object({
+      attempt: number2().int(),
+      accepted: boolean2(),
+      feedback: string2().optional(),
+      reviewed_at: string2(),
+      operation_id: string2(),
+      outcome: _enum(["accepted", "continued"])
+    }).nullable()
+  }),
+  notifications: array(object({
+    event_id: string2(),
+    reason: string2(),
+    attempt: number2().int(),
+    delivery: object({
+      state: _enum(["pending", "sent", "failed", "superseded"]),
+      attempts: number2().int(),
+      last_error: string2().optional(),
+      last_attempt_at: string2().optional(),
+      next_retry_at: string2().optional(),
+      sent_at: string2().optional()
+    })
+  }))
+});
+var scheduleReviewResultSchema = object({
+  task_id: string2(),
+  attempt: number2().int().positive(),
+  accepted: boolean2(),
+  action: _enum(["accepted", "continued"]),
+  receipt: taskReceiptSchema.optional()
+});
+var scheduleCancelResultSchema = object({
+  task_id: string2(),
+  schedule_status: scheduleGoalStatusSchema,
+  task_status: _enum(["queued", "running", "completed", "failed", "cancelled", "waiting_for_master"]).nullable()
 });
 
 // src/ledger/mcp.ts
@@ -27338,6 +27468,90 @@ function fingerprintOf(value) {
   return createHash3("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16);
 }
 
+// src/schedule/errors.ts
+var ScheduleError = class extends Error {
+  code;
+  constructor(code, message) {
+    super(message);
+    this.name = "ScheduleError";
+    this.code = code;
+  }
+};
+
+// src/schedule/mcp.ts
+function okResult2(data) {
+  return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], structuredContent: { ...data } };
+}
+function errorResult2(code, message) {
+  return { isError: true, content: [{ type: "text", text: `${code}: ${message}` }], structuredContent: { error: { code, message } } };
+}
+function mapScheduleError(error2) {
+  if (error2 instanceof ScheduleError) return errorResult2(error2.code, error2.message);
+  if (error2 instanceof TaskManagerError) return errorResult2(error2.code, error2.message);
+  throw error2;
+}
+var SCHEDULE_QUIET_NOTE = "Scheduled goals run quietly: normal progress and a false self-assessment continue the SAME ZCode session without model wakeups; only review requests, blocked interactions, failures, quota exhaustion, unverified cleanup, or a missing self-assessment wake the original chat.";
+function registerScheduleTools(server, options) {
+  const controller = options.controller;
+  const refreshPipe = () => {
+    const pipe2 = options.appPipeSource?.();
+    if (pipe2) controller.noteAppPipePath(pipe2);
+  };
+  server.registerTool("zcode_schedule", {
+    title: "Schedule one ZCode goal for autonomous execution",
+    description: `Submit one bounded goal to start at an absolute time (ISO datetime WITH timezone) on this Linux host, supervised by the user's systemd manager. task_id is the schedule key: an identical resubmission replays the schedule receipt; a different request with the same id returns SCHEDULE_CONFLICT. thread_id MUST be the UUID of the current original Codex chat, captured from host context (for example CODEX_THREAD_ID when the host provides it) \u2014 never guessed from unrelated environment. The scheduled prompt additionally requires the agent's boolean acceptance_met self-assessment: false continues the same session quietly, true wakes thread_id for independent review, and a missing/invalid assessment wakes it with uncertainty. Requires user-level systemd; a missing supervisor or App pipe fails visibly for scheduling only while the ordinary tools keep working. ${SCHEDULE_QUIET_NOTE}`,
+    inputSchema: zcodeScheduleInputSchema,
+    outputSchema: scheduleReceiptSchema
+  }, async (args) => {
+    try {
+      refreshPipe();
+      if (options.appPipeSource && !options.appPipeSource()) throw new ScheduleError("SCHEDULE_SUPERVISOR_UNAVAILABLE", "Codex App tools pipe is not configured; cannot schedule a goal with a completion wakeup");
+      return okResult2(await controller.submit({ task: args.task, start_at: args.start_at, thread_id: args.thread_id }));
+    } catch (error2) {
+      return mapScheduleError(error2);
+    }
+  });
+  server.registerTool("zcode_schedule_status", {
+    title: "Read scheduled goal status",
+    description: `Read one schedule's goal state (scheduled/dispatched/awaiting_review/accepted/cancelled/failed), the live Bridge execution state for its task, any attention reason, the pending review window, and wakeup delivery states. Execution status and goal review are reported separately; a sent wakeup is never task acceptance. ${SCHEDULE_QUIET_NOTE}`,
+    inputSchema: zcodeScheduleStatusInputSchema,
+    outputSchema: scheduleStatusSchema
+  }, async (args) => {
+    try {
+      refreshPipe();
+      return okResult2(await controller.status(args.task_id));
+    } catch (error2) {
+      return mapScheduleError(error2);
+    }
+  });
+  server.registerTool("zcode_schedule_review", {
+    title: "Record the independent review verdict for a scheduled goal",
+    description: `After zcode_schedule_status shows awaiting_review, verify the work independently, then record the verdict for exactly that attempt. accepted=true ends the goal. accepted=false REQUIRES concrete feedback and resumes the SAME ZCode session through a stable continuation; address every feedback point. Stale attempts, cancelled goals, and conflicting verdicts are rejected; retrying the identical verdict replays the recorded outcome.`,
+    inputSchema: zcodeScheduleReviewInputSchema,
+    outputSchema: scheduleReviewResultSchema
+  }, async (args) => {
+    try {
+      refreshPipe();
+      return okResult2(await controller.review(args));
+    } catch (error2) {
+      return mapScheduleError(error2);
+    }
+  });
+  server.registerTool("zcode_schedule_cancel", {
+    title: "Cancel a scheduled goal",
+    description: "Cancel one scheduled goal: the stop intent is persisted FIRST (blocking any further automatic continuation), then any existing task is cancelled through the verified process-tree path. Idempotent; cancelling an accepted goal is rejected. Obsolete undelivered wakeup events are superseded.",
+    inputSchema: zcodeScheduleCancelInputSchema,
+    outputSchema: scheduleCancelResultSchema
+  }, async (args) => {
+    try {
+      refreshPipe();
+      return okResult2({ task_id: args.task_id, ...await controller.cancel(args.task_id) });
+    } catch (error2) {
+      return mapScheduleError(error2);
+    }
+  });
+}
+
 // src/feedback/renderer.ts
 function displayText(value, limit) {
   return value.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/gu, " ").trim().slice(0, limit);
@@ -27428,13 +27642,13 @@ function formatDuration(durationMs2) {
 var SERVER_NAME = "codex-zcode-bridge";
 var SERVER_VERSION = "1.2.7"; // x-release-please-version
 var EXECUTION_NOT_VERDICT = "Results describe Bridge/ZCode execution only: status 'completed' means the invocation and report normalization finished, NOT that the calling host accepted the work. the calling host must independently review the workspace diff and checks before deciding PASS.";
-function okResult2(data) {
+function okResult3(data) {
   return {
     content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
     structuredContent: data
   };
 }
-function errorResult2(code, message) {
+function errorResult3(code, message) {
   return {
     isError: true,
     content: [{ type: "text", text: `${code}: ${message}` }],
@@ -27450,12 +27664,12 @@ function feedbackResult(snapshot) {
 async function runTool(operation) {
   try {
     const data = await operation();
-    return okResult2(data);
+    return okResult3(data);
   } catch (error2) {
     if (error2 instanceof TaskManagerError) {
-      return errorResult2(error2.code, error2.message);
+      return errorResult3(error2.code, error2.message);
     }
-    if (error2 instanceof BridgeError) return errorResult2(error2.code.toUpperCase(), error2.message);
+    if (error2 instanceof BridgeError) return errorResult3(error2.code.toUpperCase(), error2.message);
     throw error2;
   }
 }
@@ -27472,7 +27686,7 @@ function createBridgeServer(options) {
       outputSchema: doctorReportSchema
     },
     async () => {
-      if (!options.doctor) return errorResult2("DOCTOR_UNAVAILABLE", "Bridge doctor is unavailable in this server instance");
+      if (!options.doctor) return errorResult3("DOCTOR_UNAVAILABLE", "Bridge doctor is unavailable in this server instance");
       return runTool(() => options.doctor());
     }
   );
@@ -27485,7 +27699,7 @@ function createBridgeServer(options) {
       outputSchema: modelCatalogSchema
     },
     async (args) => {
-      if (!options.modelSettings) return errorResult2("MODEL_SETTINGS_UNAVAILABLE", "model settings are unavailable in this server instance");
+      if (!options.modelSettings) return errorResult3("MODEL_SETTINGS_UNAVAILABLE", "model settings are unavailable in this server instance");
       return runTool(() => options.modelSettings.listModels(args.workspace));
     }
   );
@@ -27498,7 +27712,7 @@ function createBridgeServer(options) {
       outputSchema: defaultModelSchema
     },
     async () => {
-      if (!options.modelSettings) return errorResult2("MODEL_SETTINGS_UNAVAILABLE", "model settings are unavailable in this server instance");
+      if (!options.modelSettings) return errorResult3("MODEL_SETTINGS_UNAVAILABLE", "model settings are unavailable in this server instance");
       return runTool(() => options.modelSettings.getDefaultModel());
     }
   );
@@ -27511,7 +27725,7 @@ function createBridgeServer(options) {
       outputSchema: defaultModelSchema
     },
     async (args) => {
-      if (!options.modelSettings) return errorResult2("MODEL_SETTINGS_UNAVAILABLE", "model settings are unavailable in this server instance");
+      if (!options.modelSettings) return errorResult3("MODEL_SETTINGS_UNAVAILABLE", "model settings are unavailable in this server instance");
       return runTool(() => options.modelSettings.setDefaultModel(args));
     }
   );
@@ -27524,7 +27738,7 @@ function createBridgeServer(options) {
       outputSchema: defaultModelSchema
     },
     async () => {
-      if (!options.modelSettings) return errorResult2("MODEL_SETTINGS_UNAVAILABLE", "model settings are unavailable in this server instance");
+      if (!options.modelSettings) return errorResult3("MODEL_SETTINGS_UNAVAILABLE", "model settings are unavailable in this server instance");
       return runTool(() => options.modelSettings.clearDefaultModel());
     }
   );
@@ -27558,13 +27772,13 @@ function createBridgeServer(options) {
     },
     async (args) => {
       const getFeedback = manager.getFeedback;
-      if (!getFeedback) return errorResult2("FEEDBACK_UNAVAILABLE", "task manager does not provide feedback snapshots");
+      if (!getFeedback) return errorResult3("FEEDBACK_UNAVAILABLE", "task manager does not provide feedback snapshots");
       try {
         const snapshot = await getFeedback.call(manager, args.task_id);
         return feedbackResult(snapshot);
       } catch (error2) {
-        if (error2 instanceof TaskManagerError) return errorResult2(error2.code, error2.message);
-        if (error2 instanceof BridgeError) return errorResult2(error2.code.toUpperCase(), error2.message);
+        if (error2 instanceof TaskManagerError) return errorResult3(error2.code, error2.message);
+        if (error2 instanceof BridgeError) return errorResult3(error2.code.toUpperCase(), error2.message);
         throw error2;
       }
     }
@@ -27578,7 +27792,7 @@ function createBridgeServer(options) {
       outputSchema: taskProgressPageSchema
     },
     async (args) => {
-      if (!manager.getEvents) return errorResult2("EVENTS_UNAVAILABLE", "task manager does not provide progress events");
+      if (!manager.getEvents) return errorResult3("EVENTS_UNAVAILABLE", "task manager does not provide progress events");
       return runTool(() => manager.getEvents(args));
     }
   );
@@ -27590,7 +27804,7 @@ function createBridgeServer(options) {
       inputSchema: zcodeInteractionReplyInputSchema
     },
     async (args) => {
-      if (!manager.replyToInteraction) return errorResult2("INTERACTIONS_UNAVAILABLE", "task manager does not provide ZCode interaction replies");
+      if (!manager.replyToInteraction) return errorResult3("INTERACTIONS_UNAVAILABLE", "task manager does not provide ZCode interaction replies");
       return runTool(() => manager.replyToInteraction(args));
     }
   );
@@ -27626,6 +27840,9 @@ function createBridgeServer(options) {
   );
   if (options.ledger) {
     registerLedgerTools(server, options.ledger);
+  }
+  if (options.schedule) {
+    registerScheduleTools(server, options.schedule);
   }
   if (options.enableExperiments) server.registerTool(
     "zcode_progress_probe",
@@ -28513,17 +28730,847 @@ async function writeModelCatalogCache(cachePath, cache) {
   }
 }
 
+// src/schedule/controller.ts
+import { randomUUID as randomUUID4 } from "node:crypto";
+import { mkdirSync as mkdirSync5 } from "node:fs";
+import path13 from "node:path";
+init_task_store();
+init_process_lock();
+
+// src/schedule/policy.ts
+var SCHEDULE_SELF_ASSESSMENT_REQUIREMENT = "This task runs under a scheduled autonomous loop. Your final JSON response must additionally include the boolean field acceptance_met: your honest assessment of whether this task's acceptance criteria are met by the completed work. This self-assessment is not the master's acceptance; the master still verifies independently. Set acceptance_met=false when the criteria are not yet met, and never set it true merely because work stopped.";
+function deriveScheduledTask(task) {
+  return { ...task, requirements: [...task.requirements, SCHEDULE_SELF_ASSESSMENT_REQUIREMENT] };
+}
+function reviewContinueOperationId(taskId, attempt) {
+  return `sched-review-${taskId}-a${String(attempt)}`;
+}
+function buildEventId(taskId, attempt, reason, suffix = "") {
+  return `${taskId}:${attempt}:${reason}${suffix ? `:${suffix}` : ""}`;
+}
+var REASON_HEADLINES = {
+  pending_interaction: "ZCode is blocked waiting for a permission or input decision",
+  review_requested: "attempt finished with acceptance_met=true; independent review required",
+  needs_decision: "the agent flagged needs_master_decision",
+  task_failed: "the attempt failed",
+  usage_exhausted: "provider usage quota is exhausted",
+  task_cancelled: "the task was cancelled outside the schedule",
+  missing_self_assessment: "the attempt completed without the required acceptance_met self-assessment; treat the outcome as uncertain",
+  dispatch_failed: "the scheduler could not start the task",
+  continue_failed: "the scheduler could not continue the session automatically",
+  cancel_failed: "cancellation cleanup is unverified; the stop intent is preserved and a human decision is required"
+};
+function buildNotificationMessage(input) {
+  const lines = [
+    `Event ID: ${JSON.stringify(input.eventId)}`,
+    `[ZCode Bridge schedule] task "${input.taskId}" attempt ${String(input.attempt)}: ${REASON_HEADLINES[input.reason]}.`,
+    "This is a scheduler wakeup, not task acceptance; execution status and goal review are separate.",
+    `- Inspect the authoritative state yourself with zcode_schedule_status (task_id "${input.taskId}"), then zcode_status / zcode_result / zcode_events on the task.`,
+    "- If the agent self-assessed acceptance_met=true: independently verify the work, then call zcode_schedule_review with accepted=true, or accepted=false plus concrete feedback to resume the SAME ZCode session.",
+    "- For a pending permission or input request: decide with the user and reply via zcode_interaction_reply using the exact request_id; the scheduler never auto-approves.",
+    "- If provider quota is exhausted or cleanup is unverified: stop, inform the user, and do not auto-retry or continue.",
+    "- Notify the human only when you accept the outcome or a human decision is required."
+  ];
+  const parts = [`reason=${input.reason}`];
+  if (input.requestId) parts.push(`request_id=${input.requestId}`);
+  if (input.errorCode) parts.push(`error_code=${input.errorCode}`);
+  lines.push(parts.join(" "));
+  return lines.join("\n");
+}
+function buildReviewContinueFeedback(feedback, attempt) {
+  return [
+    `Independent review of attempt ${String(attempt)} rejected the work. Address every point below, continue the SAME task in this session, then finish with the required JSON report including the honest acceptance_met self-assessment.`,
+    `REVIEW FEEDBACK:
+${feedback}`
+  ].join("\n\n");
+}
+
+// src/schedule/supervisor.ts
+import { execFile as execFileCallback } from "node:child_process";
+import path12 from "node:path";
+import { promisify } from "node:util";
+var execFile = promisify(execFileCallback);
+function planSystemdRunUnit(options) {
+  const unit = options.unit;
+  const logPath = path12.join(options.scheduleDir, "runner.log");
+  const command = options.nodeExecutable ?? process.execPath;
+  const args = [options.runnerEntryPath, options.dataRoot, options.taskId];
+  const forwarded = {
+    ...createWorkerEnv(options.env),
+    ...options.env["XDG_RUNTIME_DIR"] !== void 0 ? { XDG_RUNTIME_DIR: options.env["XDG_RUNTIME_DIR"] } : {},
+    ...options.env["DBUS_SESSION_BUS_ADDRESS"] !== void 0 ? { DBUS_SESSION_BUS_ADDRESS: options.env["DBUS_SESSION_BUS_ADDRESS"] } : {},
+    ...options.env["ELECTRON_RUN_AS_NODE"] !== void 0 ? { ELECTRON_RUN_AS_NODE: options.env["ELECTRON_RUN_AS_NODE"] } : {},
+    ...options.env["ZCODE_BRIDGE_PLUGIN_MODE"] !== void 0 ? { ZCODE_BRIDGE_PLUGIN_MODE: options.env["ZCODE_BRIDGE_PLUGIN_MODE"] } : {},
+    ...options.env["ZCODE_BRIDGE_HOST_PROFILE"] !== void 0 ? { ZCODE_BRIDGE_HOST_PROFILE: options.env["ZCODE_BRIDGE_HOST_PROFILE"] } : {},
+    ...options.env["ZCODE_BRIDGE_MAX_CONCURRENT_WORKERS"] !== void 0 ? { ZCODE_BRIDGE_MAX_CONCURRENT_WORKERS: options.env["ZCODE_BRIDGE_MAX_CONCURRENT_WORKERS"] } : {}
+  };
+  const systemdRunArgs = [
+    "--user",
+    "--collect",
+    "--expand-environment=no",
+    "--unit",
+    unit,
+    "--property",
+    "Type=exec",
+    "--property",
+    "Restart=on-failure",
+    "--property",
+    "RestartSec=5s",
+    // Bridge workers survive runner recovery; only TaskManager verifies their cleanup.
+    "--property",
+    "KillMode=process",
+    // Restart indefinitely: a crashed runner resumes from persisted intent.
+    "--property",
+    "StartLimitIntervalSec=0",
+    "--property",
+    `StandardOutput=append:${logPath}`,
+    "--property",
+    `StandardError=append:${logPath}`,
+    // User services inherit the manager environment; clear it before Node starts.
+    "/usr/bin/env",
+    "-i",
+    ...Object.entries(forwarded).map(([key, value]) => `${key}=${value}`),
+    command,
+    ...args
+  ];
+  return { unit, logPath, command, args, systemdRunArgs };
+}
+function createSystemdRunSupervisor(deps = {}) {
+  const run = deps.execFile ?? defaultExecFile;
+  const inspect = async (unit) => {
+    const { stdout } = await run("systemctl", ["--user", "show", unit, "--property=LoadState,ActiveState,MainPID,ControlGroup"]);
+    const fields = Object.fromEntries(stdout.trim().split("\n").map((line) => {
+      const separator = line.indexOf("=");
+      return [line.slice(0, separator), line.slice(separator + 1)];
+    }));
+    return { active: fields["ActiveState"] ?? "", pid: Number(fields["MainPID"]), group: fields["ControlGroup"] ?? "", loaded: fields["LoadState"] ?? "" };
+  };
+  return {
+    async start(plan) {
+      if (process.platform !== "linux") {
+        throw new ScheduleError("SCHEDULE_SUPERVISOR_UNAVAILABLE", `scheduled goals require Linux systemd-run --user; platform ${process.platform} is not supported`);
+      }
+      const previous = await inspect(plan.unit).catch(() => null);
+      if (previous?.active === "active" && previous.pid > 0 && previous.group) return { unit: plan.unit };
+      let startFailed = false;
+      try {
+        await run("systemd-run", [...plan.systemdRunArgs]);
+      } catch {
+        startFailed = true;
+      }
+      let lastState = "unknown";
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        const observed = await inspect(plan.unit).catch(() => null);
+        lastState = observed?.active ?? "unavailable";
+        if (observed?.active === "active" && observed.pid > 0 && observed.group) return { unit: plan.unit };
+        if (observed?.active === "failed" || startFailed && observed?.loaded === "not-found") break;
+        await sleep4(150);
+      }
+      throw new ScheduleError("SCHEDULE_SUPERVISOR_UNAVAILABLE", `schedule runner unit ${plan.unit} did not become active with a MainPID and cgroup (last state: ${lastState}); inspect ${plan.logPath}`);
+    },
+    async stop(unit) {
+      try {
+        await run("systemctl", ["--user", "stop", unit]);
+      } catch {
+        const observed = await inspect(unit).catch(() => null);
+        if (observed?.loaded === "not-found" || observed?.active === "inactive" && observed.pid === 0) return;
+        throw new ScheduleError("SCHEDULE_SUPERVISOR_UNAVAILABLE", `could not stop schedule runner unit ${unit}`);
+      }
+    }
+  };
+}
+function sleep4(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+function defaultExecFile(file, args) {
+  return execFile(file, args, { timeout: 15e3, encoding: "utf8" });
+}
+
+// src/schedule/types.ts
+var START_AT_PATTERN2 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/u;
+var THREAD_ID_PATTERN2 = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/u;
+
+// src/schedule/controller.ts
+var DELIVERY_BACKOFF_BASE_MS = 3e4;
+var DELIVERY_BACKOFF_MAX_MS = 10 * 6e4;
+var ScheduleController = class {
+  #store;
+  #manager;
+  #supervisor;
+  #runnerEntryPath;
+  #dataRoot;
+  #env;
+  #notifier;
+  #nodeExecutable;
+  #now;
+  constructor(options) {
+    this.#store = options.store;
+    this.#manager = options.manager;
+    this.#supervisor = options.supervisor;
+    this.#runnerEntryPath = options.runnerEntryPath;
+    this.#dataRoot = options.dataRoot;
+    this.#env = options.env;
+    this.#notifier = options.notifier ?? null;
+    this.#nodeExecutable = options.nodeExecutable;
+    this.#now = options.now ?? (() => /* @__PURE__ */ new Date());
+  }
+  get store() {
+    return this.#store;
+  }
+  readSpec(taskId) {
+    return this.#store.readSpec(taskId);
+  }
+  readState(taskId) {
+    return this.#store.readState(taskId);
+  }
+  /** The MCP host refreshes the App pipe location on reconnection; the
+   * runner resolves it from this record per send. */
+  noteAppPipePath(pipePath) {
+    this.#store.writeRuntime({ app_pipe_path: pipePath, updated_at: this.#now().toISOString() });
+  }
+  async submit(input) {
+    if (!Number.isFinite(Date.parse(input.start_at)) || !START_AT_PATTERN2.test(input.start_at)) {
+      throw new ScheduleError("SCHEDULE_INVALID", "start_at must be an ISO 8601 datetime with a timezone offset");
+    }
+    if (!THREAD_ID_PATTERN2.test(input.thread_id)) {
+      throw new ScheduleError("SCHEDULE_INVALID", "thread_id must be a UUID identifying the original Codex chat");
+    }
+    const taskId = input.task.task_id;
+    mkdirSync5(this.#store.scheduleDir(taskId), { recursive: true, mode: 448 });
+    return withProcessLock(path13.join(this.#store.scheduleDir(taskId), "state.lock"), async () => {
+      let spec;
+      if (this.#store.hasSchedule(taskId)) {
+        spec = this.#store.readSpec(taskId);
+        if (stableJson({ task: spec.task, start_at: spec.start_at, thread_id: spec.thread_id }) !== stableJson({ task: input.task, start_at: input.start_at, thread_id: input.thread_id })) {
+          throw new ScheduleError("SCHEDULE_CONFLICT", `schedule ${taskId} already exists with a different request`);
+        }
+      } else {
+        const existing = await this.#manager.getStatus(taskId).catch((error2) => {
+          if (error2 instanceof TaskManagerError && error2.code === "TASK_NOT_FOUND") return null;
+          throw error2;
+        });
+        if (existing !== null) throw new ScheduleError("SCHEDULE_CONFLICT", `task_id ${taskId} already belongs to a non-scheduled Bridge task`);
+        spec = {
+          task_id: taskId,
+          task: input.task,
+          start_at: input.start_at,
+          thread_id: input.thread_id,
+          created_at: this.#now().toISOString(),
+          supervisor_unit: `zcode-bridge-schedule-${randomUUID4()}`
+        };
+        this.#store.writeSpec(spec);
+      }
+      let state = this.#store.hasState(taskId) ? this.#store.readState(taskId) : initialState(taskId, spec.created_at);
+      this.#store.writeState(state);
+      if (!["accepted", "cancelled", "failed"].includes(state.status)) state = await this.#startLocked(spec, state);
+      return this.#receiptFrom(spec, state);
+    }, 6e4);
+  }
+  async #startLocked(spec, state) {
+    const plan = planSystemdRunUnit({
+      unit: spec.supervisor_unit,
+      runnerEntryPath: this.#runnerEntryPath,
+      scheduleDir: this.#store.scheduleDir(spec.task_id),
+      dataRoot: this.#dataRoot,
+      taskId: spec.task_id,
+      env: this.#env,
+      nodeExecutable: this.#nodeExecutable
+    });
+    const prepared = { ...state, supervisor: state.supervisor ?? {
+      unit: spec.supervisor_unit,
+      log_path: plan.logPath,
+      started_at: null
+    }, updated_at: this.#now().toISOString() };
+    this.#store.writeState(prepared);
+    try {
+      await this.#supervisor.start(plan);
+    } catch (error2) {
+      this.#store.writeState({ ...prepared, failure_reason: boundedErrorMessage(error2, 500), updated_at: this.#now().toISOString() });
+      throw error2;
+    }
+    const started = { ...prepared, failure_reason: null, supervisor: {
+      unit: plan.unit,
+      log_path: plan.logPath,
+      started_at: prepared.supervisor.started_at ?? this.#now().toISOString()
+    }, updated_at: this.#now().toISOString() };
+    this.#store.writeState(started);
+    return started;
+  }
+  async status(taskId) {
+    const spec = this.#store.readSpec(taskId);
+    const state = this.#store.readState(taskId);
+    return {
+      task_id: taskId,
+      schedule: {
+        status: state.status,
+        start_at: spec.start_at,
+        thread_id: spec.thread_id,
+        created_at: spec.created_at,
+        updated_at: state.updated_at,
+        cancel_requested: state.cancel_requested,
+        supervisor: state.supervisor ? { unit: state.supervisor.unit, log_path: state.supervisor.log_path } : null,
+        failure_reason: state.failure_reason
+      },
+      execution: await this.#executionView(taskId),
+      goal: {
+        attention: state.attention,
+        attempt_under_review: state.attempt_under_review,
+        review: state.review
+      },
+      notifications: this.#store.listNotifications(taskId).map((notification) => ({
+        event_id: notification.event_id,
+        reason: notification.reason,
+        attempt: notification.attempt,
+        delivery: notification.delivery
+      }))
+    };
+  }
+  /** Idempotent dispatch of the derived task (runner + recovery entry). The
+   * TaskManager's own submission idempotency prevents a second execution. */
+  async dispatch(taskId) {
+    return this.#locked(taskId, async (state, spec) => {
+      if (state.status === "dispatched" || state.status === "awaiting_review") return { dispatched: true };
+      if (state.cancel_requested || state.status !== "scheduled") return { dispatched: false };
+      let receipt;
+      try {
+        receipt = await this.#manager.createTask(deriveScheduledTask(spec.task));
+      } catch (error2) {
+        this.#failLocked(taskId, state, "dispatch_failed", boundedErrorMessage(error2, 500));
+        this.#enqueueLocked(taskId, spec, { attempt: 1, reason: "dispatch_failed", eventId: buildEventId(taskId, 1, "dispatch_failed"), errorCode: "dispatch_failed" });
+        throw new ScheduleError("SCHEDULE_STATE", `scheduled task ${taskId} could not be dispatched: ${boundedErrorMessage(error2, 300)}`);
+      }
+      this.#store.writeState({
+        ...state,
+        status: "dispatched",
+        dispatched_at: this.#now().toISOString(),
+        attention: null,
+        updated_at: this.#now().toISOString()
+      });
+      void receipt;
+      return { dispatched: true };
+    });
+  }
+  /** Quiet same-session continuation (acceptance_met=false or verified
+   * timeout). Guarded against a persisted stop intent; operation_id makes a
+   * crash-retry replay the same continuation. */
+  async autoContinue(taskId, attempt, feedback, operationId) {
+    return this.#locked(taskId, async (state) => {
+      if (state.cancel_requested || ["cancelled", "accepted", "failed"].includes(state.status)) return { continued: false, reason: `schedule is ${state.status}` };
+      const current = await this.#manager.getStatus(taskId);
+      if (current.attempt > attempt) return { continued: true };
+      if (current.observation?.cleanup !== "verified") return { continued: false, reason: "process cleanup is not verified" };
+      const result = await this.#manager.getResult(taskId);
+      if (result.session_id === null) return { continued: false, reason: "no saved ZCode session to resume" };
+      try {
+        await this.#manager.continueTask({ task_id: taskId, feedback, operation_id: operationId, expected_attempt: attempt });
+      } catch (error2) {
+        return { continued: false, reason: boundedErrorMessage(error2, 300) };
+      }
+      this.#store.writeState({ ...state, status: "dispatched", attempt_under_review: null, attention: null, updated_at: this.#now().toISOString() });
+      return { continued: true };
+    });
+  }
+  /** A new attempt began (also when the Codex host continued the task itself):
+   * attention and a stale review window give way to active monitoring. */
+  async noteActiveAttempt(taskId, attempt) {
+    await this.#locked(taskId, async (state) => {
+      if (state.status === "accepted" || state.status === "cancelled" || state.status === "failed") return;
+      const reference = Math.max(state.attention?.attempt ?? 0, state.attempt_under_review ?? 0);
+      if (attempt <= reference) return;
+      this.#store.writeState({
+        ...state,
+        status: state.status === "awaiting_review" ? "dispatched" : state.status,
+        attempt_under_review: null,
+        attention: null,
+        updated_at: this.#now().toISOString()
+      });
+    });
+  }
+  /** Terminal attempt with acceptance_met=true: wake the original thread for
+   * independent review; the goal now waits for zcode_schedule_review. */
+  async requestReview(taskId, attempt) {
+    await this.#locked(taskId, async (state, spec) => {
+      if (state.cancel_requested || state.status === "cancelled" || state.status === "accepted" || state.status === "failed") return;
+      if (state.status === "awaiting_review" && state.attempt_under_review === attempt) return;
+      const eventId = buildEventId(taskId, attempt, "review_requested");
+      this.#enqueueLocked(taskId, spec, { attempt, reason: "review_requested", eventId });
+      this.#store.writeState({
+        ...state,
+        status: "awaiting_review",
+        attempt_under_review: attempt,
+        attention: { reason: "review_requested", attempt, event_id: eventId, set_at: this.#now().toISOString() },
+        updated_at: this.#now().toISOString()
+      });
+    });
+  }
+  /** Persist the escalation and its wakeup event; no automatic retry or
+   * approval ever follows. Idempotent per (attempt, reason, suffix). */
+  async escalate(taskId, attempt, reason, options = {}) {
+    await this.#locked(taskId, async (state, spec) => {
+      if (state.cancel_requested || state.status === "cancelled" || state.status === "accepted" || state.status === "failed") return;
+      const eventId = buildEventId(taskId, attempt, reason, options.requestId ?? "");
+      if (state.attention?.event_id === eventId) return;
+      this.#enqueueLocked(taskId, spec, { attempt, reason, eventId, requestId: options.requestId, errorCode: options.errorCode });
+      this.#store.writeState({
+        ...state,
+        attention: { reason, attempt, event_id: eventId, set_at: this.#now().toISOString(), ...options.detail !== void 0 ? { detail: options.detail } : {} },
+        updated_at: this.#now().toISOString()
+      });
+    });
+  }
+  /** Wake once per still-pending interaction request; never auto-replies. */
+  async notifyPendingInteraction(taskId, attempt, request) {
+    await this.#locked(taskId, async (state, spec) => {
+      if (state.cancel_requested || state.status === "cancelled" || state.status === "accepted" || state.status === "failed") return;
+      if (state.notified_interactions.includes(request.request_id)) return;
+      const eventId = buildEventId(taskId, attempt, "pending_interaction", request.request_id);
+      this.#enqueueLocked(taskId, spec, { attempt, reason: "pending_interaction", eventId, requestId: request.request_id });
+      this.#store.writeState({
+        ...state,
+        notified_interactions: [...state.notified_interactions, request.request_id],
+        attention: { reason: "pending_interaction", attempt, event_id: eventId, set_at: this.#now().toISOString(), detail: request.request_id },
+        updated_at: this.#now().toISOString()
+      });
+    });
+  }
+  /** Independent Codex review of the attempt that requested it. Rejection
+   * requires feedback and resumes the SAME session via continueTask under a
+   * stable operation id; acceptance ends the goal. */
+  async review(input) {
+    return this.#locked(input.task_id, async (state) => {
+      if (state.cancel_requested || state.status === "cancelled") throw new ScheduleError("SCHEDULE_STATE", "schedule has a persisted stop intent");
+      const prior = state.review;
+      if (prior?.attempt === input.attempt) {
+        if (prior.accepted !== input.accepted || prior.feedback !== input.feedback) throw new ScheduleError("SCHEDULE_STATE", "this attempt already has a different review");
+        return prior.accepted ? { task_id: input.task_id, attempt: input.attempt, accepted: true, action: "accepted" } : { task_id: input.task_id, attempt: input.attempt, accepted: false, action: "continued", receipt: prior.receipt };
+      }
+      if (state.review_intent?.attempt === input.attempt) {
+        const intent2 = state.review_intent;
+        if (intent2.accepted !== input.accepted || intent2.feedback !== input.feedback) throw new ScheduleError("SCHEDULE_STATE", "a different review is already in flight");
+        return this.#finishReviewLocked(input.task_id, state, input, intent2.operation_id);
+      }
+      if (state.status !== "awaiting_review" || input.attempt !== state.attempt_under_review) throw new ScheduleError("SCHEDULE_STALE_REVIEW", "this attempt is not awaiting review");
+      if (!input.accepted && !input.feedback?.trim()) throw new ScheduleError("SCHEDULE_FEEDBACK_REQUIRED", "rejecting a review requires concrete feedback");
+      const current = await this.#manager.getStatus(input.task_id);
+      if (current.attempt !== input.attempt || !["completed", "failed", "waiting_for_master"].includes(current.status)) throw new ScheduleError("SCHEDULE_STALE_REVIEW", "execution has advanced since this review was requested");
+      const intent = {
+        attempt: input.attempt,
+        accepted: input.accepted,
+        feedback: input.feedback,
+        operation_id: reviewContinueOperationId(input.task_id, input.attempt),
+        set_at: this.#now().toISOString()
+      };
+      const prepared = { ...state, review_intent: intent, updated_at: intent.set_at };
+      this.#store.writeState(prepared);
+      return this.#finishReviewLocked(input.task_id, prepared, input, intent.operation_id);
+    });
+  }
+  /** Complete an authorized review after its MCP caller disappears. */
+  async recoverReview(taskId) {
+    await this.#locked(taskId, async (state, spec) => {
+      if (!state.review_intent || state.cancel_requested || ["accepted", "cancelled", "failed"].includes(state.status)) return;
+      const intent = state.review_intent;
+      try {
+        await this.#finishReviewLocked(taskId, state, {
+          task_id: taskId,
+          attempt: intent.attempt,
+          accepted: intent.accepted,
+          feedback: intent.feedback
+        }, intent.operation_id);
+      } catch (error2) {
+        const current = await this.#manager.getStatus(taskId);
+        if (current.attempt > intent.attempt) {
+          this.#store.writeState({
+            ...state,
+            status: "dispatched",
+            attempt_under_review: null,
+            attention: null,
+            review_intent: null,
+            failure_reason: "The saved review was superseded by a newer task attempt.",
+            updated_at: this.#now().toISOString()
+          });
+          return;
+        }
+        if (!(error2 instanceof ScheduleError || error2 instanceof TaskManagerError)) throw error2;
+        const eventId = buildEventId(taskId, intent.attempt, "needs_decision", "review_recovery");
+        this.#enqueueLocked(taskId, spec, { attempt: intent.attempt, reason: "needs_decision", eventId });
+        this.#store.writeState({
+          ...state,
+          review_intent: null,
+          failure_reason: boundedErrorMessage(error2, 300),
+          attention: { reason: "needs_decision", attempt: intent.attempt, event_id: eventId, set_at: this.#now().toISOString() },
+          updated_at: this.#now().toISOString()
+        });
+      }
+    });
+  }
+  async #finishReviewLocked(taskId, state, input, operationId) {
+    if (input.accepted) {
+      const tasksRoot = path13.join(this.#dataRoot, ".tasks");
+      mkdirSync5(tasksRoot, { recursive: true, mode: 448 });
+      return withProcessLock(path13.join(tasksRoot, ".manager.lock"), async () => {
+        const current = await this.#manager.getStatus(taskId);
+        if (current.attempt !== input.attempt || !["completed", "failed", "waiting_for_master"].includes(current.status)) throw new ScheduleError("SCHEDULE_STALE_REVIEW", "execution has advanced since this review was requested");
+        if (current.observation?.cleanup !== "verified") throw new ScheduleError("SCHEDULE_STATE", "process cleanup must be verified before acceptance");
+        const reviewedAt2 = this.#now().toISOString();
+        this.#store.writeState({
+          ...state,
+          status: "accepted",
+          attempt_under_review: null,
+          attention: null,
+          review_intent: null,
+          review: { attempt: input.attempt, accepted: true, feedback: input.feedback, reviewed_at: reviewedAt2, operation_id: operationId, outcome: "accepted" },
+          updated_at: reviewedAt2
+        });
+        return { task_id: taskId, attempt: input.attempt, accepted: true, action: "accepted" };
+      });
+    }
+    const receipt = await this.#manager.continueTask({
+      task_id: taskId,
+      feedback: buildReviewContinueFeedback(input.feedback ?? "", input.attempt),
+      operation_id: operationId,
+      expected_attempt: input.attempt
+    });
+    const reviewedAt = this.#now().toISOString();
+    this.#store.writeState({
+      ...state,
+      status: "dispatched",
+      attempt_under_review: null,
+      attention: null,
+      review_intent: null,
+      review: { attempt: input.attempt, accepted: false, feedback: input.feedback, reviewed_at: reviewedAt, operation_id: operationId, outcome: "continued", receipt },
+      updated_at: reviewedAt
+    });
+    return { task_id: taskId, attempt: input.attempt, accepted: false, action: "continued", receipt };
+  }
+  /** Stop intent persists FIRST, then the existing TaskManager cancellation
+   * verifies cleanup; a cleanup failure surfaces and keeps the stop intent. */
+  async cancel(taskId) {
+    return this.#locked(taskId, async (state, spec) => {
+      if (state.status === "cancelled") {
+        if (state.supervisor) await this.#supervisor.stop(state.supervisor.unit);
+        return { schedule_status: "cancelled", task_status: await this.#taskStatusOrNull(taskId) };
+      }
+      if (state.status === "accepted") throw new ScheduleError("SCHEDULE_STATE", `schedule ${taskId} was accepted; nothing to cancel`);
+      this.#store.writeState({ ...state, cancel_requested: true, updated_at: this.#now().toISOString() });
+      const tasksRoot = path13.join(this.#dataRoot, ".tasks");
+      mkdirSync5(tasksRoot, { recursive: true, mode: 448 });
+      let attempt = state.attempt_under_review ?? state.attention?.attempt ?? 1;
+      try {
+        while (true) {
+          const committed = await withProcessLock(path13.join(tasksRoot, ".manager.lock"), async () => {
+            const execution = await this.#manager.getStatus(taskId).catch((error2) => {
+              if (error2 instanceof TaskManagerError && error2.code === "TASK_NOT_FOUND") return null;
+              throw error2;
+            });
+            attempt = execution?.attempt ?? attempt;
+            if (execution && (!["completed", "failed", "cancelled", "waiting_for_master"].includes(execution.status) || execution.observation?.cleanup !== "verified")) return false;
+            this.#store.writeState({
+              ...this.#store.readState(taskId),
+              status: "cancelled",
+              attention: null,
+              attempt_under_review: null,
+              review_intent: null,
+              failure_reason: null,
+              updated_at: this.#now().toISOString()
+            });
+            for (const notification of this.#store.listNotifications(taskId)) {
+              if (!["sent", "superseded"].includes(notification.delivery.state)) {
+                this.#store.writeNotification(taskId, { ...notification, delivery: { state: "superseded", attempts: notification.delivery.attempts } });
+              }
+            }
+            return true;
+          });
+          if (committed) break;
+          try {
+            await this.#manager.cancelTask(taskId);
+          } catch (error2) {
+            if (!(error2 instanceof TaskManagerError && error2.code === "TASK_STATE")) throw error2;
+          }
+          const after = await this.#manager.getStatus(taskId);
+          if (after.observation?.cleanup !== "verified") throw new ScheduleError("SCHEDULE_STATE", "cancellation returned without verified process cleanup");
+        }
+      } catch (error2) {
+        const eventId = buildEventId(taskId, attempt, "cancel_failed");
+        this.#enqueueLocked(taskId, spec, { attempt, reason: "cancel_failed", eventId });
+        this.#store.writeState({
+          ...this.#store.readState(taskId),
+          status: "failed",
+          cancel_requested: true,
+          failure_reason: boundedErrorMessage(error2, 300),
+          attention: {
+            reason: "cancel_failed",
+            attempt,
+            event_id: eventId,
+            set_at: this.#now().toISOString()
+          },
+          updated_at: this.#now().toISOString()
+        });
+        throw error2;
+      }
+      if (state.supervisor) await this.#supervisor.stop(state.supervisor.unit);
+      return { schedule_status: "cancelled", task_status: await this.#taskStatusOrNull(taskId) };
+    });
+  }
+  async fail(taskId, reason, detail) {
+    await this.#locked(taskId, async (state, spec) => {
+      if (state.cancel_requested || ["accepted", "cancelled", "failed"].includes(state.status)) return;
+      this.#failLocked(taskId, state, reason, detail);
+      this.#enqueueLocked(taskId, spec, {
+        attempt: state.attempt_under_review ?? 1,
+        reason,
+        eventId: buildEventId(taskId, state.attempt_under_review ?? 1, reason)
+      });
+    });
+  }
+  /** Sends every undelivered outbox event (at-least-once); failures persist
+   * bounded errors and a retry deadline. */
+  async deliverPending(taskId) {
+    await this.#locked(taskId, async (state, spec) => {
+      const attention = state.attention;
+      if (attention && !this.#store.hasNotification(taskId, attention.event_id)) {
+        this.#enqueueLocked(taskId, spec, {
+          attempt: attention.attempt,
+          reason: attention.reason,
+          eventId: attention.event_id,
+          requestId: attention.reason === "pending_interaction" ? attention.detail : void 0
+        });
+      }
+      const pipePath = this.#store.readRuntime()?.app_pipe_path ?? null;
+      const current = await this.#manager.getStatus(taskId).catch((error2) => {
+        if (error2 instanceof TaskManagerError && error2.code === "TASK_NOT_FOUND") return null;
+        throw error2;
+      });
+      for (const notification of this.#store.listNotifications(taskId)) {
+        if (["sent", "superseded"].includes(notification.delivery.state)) continue;
+        if (state.cancel_requested && notification.reason !== "cancel_failed" || ["cancelled", "accepted"].includes(state.status) || current && notification.attempt < current.attempt) {
+          this.#store.writeNotification(taskId, { ...notification, delivery: { state: "superseded", attempts: notification.delivery.attempts } });
+          continue;
+        }
+        if (!this.#notifier) continue;
+        if (notification.delivery.next_retry_at && Date.parse(notification.delivery.next_retry_at) > this.#now().getTime()) continue;
+        const attempts = notification.delivery.attempts + 1;
+        const attemptedAt = this.#now().toISOString();
+        try {
+          if (pipePath === null) throw new Error("Codex App tools pipe is not configured");
+          await this.#notifier.send({
+            pipePath,
+            threadId: notification.thread_id,
+            callId: `${randomUUID4()}`,
+            message: notification.message
+          });
+          this.#store.writeNotification(taskId, { ...notification, delivery: { state: "sent", attempts, last_attempt_at: attemptedAt, sent_at: attemptedAt } });
+        } catch (error2) {
+          this.#store.writeNotification(taskId, { ...notification, delivery: {
+            state: "failed",
+            attempts,
+            last_error: boundedErrorMessage(error2, 300),
+            last_attempt_at: attemptedAt,
+            next_retry_at: new Date(this.#now().getTime() + Math.min(DELIVERY_BACKOFF_BASE_MS * attempts, DELIVERY_BACKOFF_MAX_MS)).toISOString()
+          } });
+        }
+      }
+    });
+  }
+  hasUndeliveredNotifications(taskId) {
+    return this.#store.listNotifications(taskId).some((notification) => !["sent", "superseded"].includes(notification.delivery.state));
+  }
+  async #taskStatusOrNull(taskId) {
+    try {
+      return (await this.#manager.getStatus(taskId)).status;
+    } catch (error2) {
+      if (error2 instanceof TaskManagerError && error2.code === "TASK_NOT_FOUND") return null;
+      throw error2;
+    }
+  }
+  async #executionView(taskId) {
+    let status;
+    try {
+      status = await this.#manager.getStatus(taskId);
+    } catch (error2) {
+      if (error2 instanceof TaskManagerError && error2.code === "TASK_NOT_FOUND") return null;
+      throw error2;
+    }
+    let result = null;
+    if (["completed", "failed", "cancelled", "waiting_for_master"].includes(status.status)) {
+      result = await this.#manager.getResult(taskId).catch((error2) => {
+        if (error2 instanceof TaskManagerError && error2.code === "TASK_NOT_FINISHED") return null;
+        throw error2;
+      });
+    }
+    return {
+      status: status.status,
+      attempt: status.attempt,
+      ...result?.error_code !== void 0 ? { error_code: result.error_code } : {},
+      needs_master_decision: result?.needs_master_decision ?? null,
+      ...result?.acceptance_met !== void 0 ? { acceptance_met: result.acceptance_met } : {}
+    };
+  }
+  #failLocked(taskId, state, reason, detail) {
+    this.#store.writeState({
+      ...state,
+      status: "failed",
+      failure_reason: detail,
+      attention: { reason, attempt: state.attempt_under_review ?? 1, event_id: buildEventId(taskId, state.attempt_under_review ?? 1, reason), set_at: this.#now().toISOString(), detail },
+      updated_at: this.#now().toISOString()
+    });
+  }
+  #enqueueLocked(taskId, spec, event) {
+    if (this.#store.hasNotification(taskId, event.eventId)) return;
+    this.#store.writeNotification(taskId, {
+      event_id: event.eventId,
+      task_id: taskId,
+      attempt: event.attempt,
+      reason: event.reason,
+      thread_id: spec.thread_id,
+      message: buildNotificationMessage({ eventId: event.eventId, taskId, attempt: event.attempt, reason: event.reason, requestId: event.requestId, errorCode: event.errorCode }),
+      created_at: this.#now().toISOString(),
+      delivery: { state: "pending", attempts: 0 }
+    });
+  }
+  #receiptFrom(spec, state) {
+    return {
+      task_id: spec.task_id,
+      status: state.status,
+      start_at: spec.start_at,
+      thread_id: spec.thread_id,
+      created_at: spec.created_at,
+      supervisor: state.supervisor ? { unit: state.supervisor.unit, log_path: state.supervisor.log_path } : null
+    };
+  }
+  async #locked(taskId, operation) {
+    this.#store.readSpec(taskId);
+    return withProcessLock(path13.join(this.#store.scheduleDir(taskId), "state.lock"), async () => {
+      const spec = this.#store.readSpec(taskId);
+      return operation(this.#store.readState(taskId), spec);
+    }, 6e4);
+  }
+};
+function initialState(taskId, createdAt) {
+  return {
+    task_id: taskId,
+    status: "scheduled",
+    created_at: createdAt,
+    updated_at: createdAt,
+    dispatched_at: null,
+    attempt_under_review: null,
+    attention: null,
+    cancel_requested: false,
+    review_intent: null,
+    review: null,
+    notified_interactions: [],
+    supervisor: null,
+    failure_reason: null
+  };
+}
+
+// src/schedule/store.ts
+init_atomic_rename();
+import { existsSync as existsSync9, mkdirSync as mkdirSync6, readFileSync as readFileSync8, writeFileSync as writeFileSync5 } from "node:fs";
+import path14 from "node:path";
+import { randomUUID as randomUUID5 } from "node:crypto";
+function schedulesRootFor(dataRoot) {
+  return path14.join(dataRoot, ".schedules");
+}
+function writeJsonAtomic(file, value) {
+  mkdirSync6(path14.dirname(file), { recursive: true, mode: 448 });
+  const temp = `${file}.${process.pid}.${randomUUID5()}.tmp`;
+  writeFileSync5(temp, JSON.stringify(value, null, 2), { mode: 384 });
+  atomicRenameSync(temp, file);
+}
+var ScheduleStore = class {
+  #root;
+  constructor(schedulesRoot) {
+    this.#root = schedulesRoot;
+  }
+  get root() {
+    return this.#root;
+  }
+  scheduleDir(taskId) {
+    return path14.join(this.#root, taskId);
+  }
+  hasSchedule(taskId) {
+    return existsSync9(path14.join(this.scheduleDir(taskId), "spec.json"));
+  }
+  hasState(taskId) {
+    return existsSync9(path14.join(this.scheduleDir(taskId), "state.json"));
+  }
+  readSpec(taskId) {
+    try {
+      return JSON.parse(readFileSync8(path14.join(this.scheduleDir(taskId), "spec.json"), "utf8"));
+    } catch (error2) {
+      if (!this.hasSchedule(taskId)) throw new ScheduleError("SCHEDULE_NOT_FOUND", `unknown schedule: ${taskId}`);
+      throw new ScheduleError("SCHEDULE_STATE", `schedule ${taskId} spec could not be read: ${error2 instanceof Error ? error2.message : String(error2)}`);
+    }
+  }
+  writeSpec(spec) {
+    writeJsonAtomic(path14.join(this.scheduleDir(spec.task_id), "spec.json"), spec);
+  }
+  readState(taskId) {
+    try {
+      return JSON.parse(readFileSync8(path14.join(this.scheduleDir(taskId), "state.json"), "utf8"));
+    } catch (error2) {
+      if (!this.hasSchedule(taskId)) throw new ScheduleError("SCHEDULE_NOT_FOUND", `unknown schedule: ${taskId}`);
+      throw new ScheduleError("SCHEDULE_STATE", `schedule ${taskId} state could not be read: ${error2 instanceof Error ? error2.message : String(error2)}`);
+    }
+  }
+  writeState(state) {
+    writeJsonAtomic(path14.join(this.scheduleDir(state.task_id), "state.json"), state);
+  }
+  notificationPath(taskId) {
+    return path14.join(this.scheduleDir(taskId), "outbox.json");
+  }
+  hasNotification(taskId, eventId) {
+    return this.listNotifications(taskId).some((record3) => record3.event_id === eventId);
+  }
+  writeNotification(taskId, notification) {
+    const records = this.listNotifications(taskId);
+    const previous = records.findIndex((record3) => record3.event_id === notification.event_id);
+    if (previous < 0) records.push(notification);
+    else records[previous] = notification;
+    writeJsonAtomic(this.notificationPath(taskId), records);
+  }
+  listNotifications(taskId) {
+    let records;
+    try {
+      records = JSON.parse(readFileSync8(this.notificationPath(taskId), "utf8"));
+    } catch (error2) {
+      if (error2 instanceof Error && "code" in error2 && error2.code === "ENOENT") return [];
+      throw error2;
+    }
+    records.sort((a, b) => a.created_at.localeCompare(b.created_at) || a.event_id.localeCompare(b.event_id));
+    return records;
+  }
+  readRuntime() {
+    try {
+      return JSON.parse(readFileSync8(path14.join(this.#root, "runtime.json"), "utf8"));
+    } catch (error2) {
+      if (error2 instanceof Error && "code" in error2 && error2.code === "ENOENT") return null;
+      throw error2;
+    }
+  }
+  writeRuntime(info) {
+    writeJsonAtomic(path14.join(this.#root, "runtime.json"), info);
+  }
+};
+
 // src/host/stdio.ts
+function scheduleRunnerEntryPath() {
+  if (process.env["ZCODE_BRIDGE_PLUGIN_MODE"] === "1") {
+    return fileURLToPath3(new URL("../worker/schedule-runner.mjs", import.meta.url));
+  }
+  return fileURLToPath3(new URL("../schedule/runner-main.js", import.meta.url));
+}
 function resolveDataRoot(env) {
   const override = env["ZCODE_BRIDGE_DATA_DIR"]?.trim();
   if (override) {
-    if (!path12.isAbsolute(override)) {
+    if (!path15.isAbsolute(override)) {
       return {
         dataRoot: findPackageRoot(),
         warning: `ZCODE_BRIDGE_DATA_DIR must be an absolute path; ignoring ${override} and using the Bridge installation directory`
       };
     }
-    return { dataRoot: path12.normalize(override) };
+    return { dataRoot: path15.normalize(override) };
   }
   return { dataRoot: findPackageRoot() };
 }
@@ -28570,12 +29617,33 @@ async function startBridge(host = codexHostProfile(), version2 = SERVER_VERSION)
     probe: createPlatformProbe()
   });
   const modelSettings = new ZCodeModelSettings(process.env, { host });
+  const scheduleController = host.name === codexHostProfile().name ? new ScheduleController({
+    store: new ScheduleStore(schedulesRootFor(dataRoot)),
+    manager,
+    supervisor: createSystemdRunSupervisor(),
+    runnerEntryPath: scheduleRunnerEntryPath(),
+    dataRoot,
+    env: {
+      ...runtimeEnv,
+      ...process.versions.electron ? { ELECTRON_RUN_AS_NODE: "1" } : {},
+      ZCODE_BRIDGE_HOST_PROFILE: JSON.stringify({ ...host, workerEntryPath: host.workerEntryPath ?? workerEntryPath() }),
+      ZCODE_BRIDGE_MAX_CONCURRENT_WORKERS: String(workerLimit.maxConcurrentWorkers)
+    }
+  }) : void 0;
+  const appPipePath = process.env["CODEX_APP_TOOLS_PIPE_PATH"]?.trim();
+  if (appPipePath) scheduleController?.noteAppPipePath(appPipePath);
   const server = createBridgeServer({
     taskManager: manager,
     doctor: () => runBridgeDoctor({ env: runtimeEnv, dataRoot, resolver: { host } }),
     modelSettings,
     serverInfo: { name: host.name, version: version2 },
-    instructions: host.instructions
+    instructions: host.instructions,
+    schedule: scheduleController ? {
+      controller: scheduleController,
+      // Host-owned pipe location, re-read per call so an MCP host reconnect
+      // with a fresh CODEX_APP_TOOLS_PIPE_PATH refreshes the runner.
+      appPipeSource: () => process.env["CODEX_APP_TOOLS_PIPE_PATH"]?.trim() || null
+    } : void 0
   });
   const handle = serveStdio(() => server);
   let closing = false;
@@ -28599,8 +29667,8 @@ async function startBridge(host = codexHostProfile(), version2 = SERVER_VERSION)
 var isEntry = process.argv[1] !== void 0 && sameRealPath(import.meta.url, process.argv[1]);
 function sameRealPath(moduleUrl, argvPath) {
   try {
-    const modulePath = realpathSync2(fileURLToPath3(moduleUrl));
-    const entryPath = realpathSync2(path13.resolve(argvPath));
+    const modulePath = realpathSync2(fileURLToPath4(moduleUrl));
+    const entryPath = realpathSync2(path16.resolve(argvPath));
     return process.platform === "win32" ? modulePath.toLocaleLowerCase("en-US") === entryPath.toLocaleLowerCase("en-US") : modulePath === entryPath;
   } catch {
     return false;

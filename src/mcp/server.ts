@@ -42,6 +42,7 @@ import type { DoctorReport } from "../runtime/doctor.js";
 import { BridgeError } from "../runtime/errors.js";
 import type { ZCodeModelSettings } from "../runtime/model-settings.js";
 import { registerLedgerTools } from "../ledger/mcp.js";
+import { registerScheduleTools } from "../schedule/mcp.js";
 import { renderTaskFeedback } from "../feedback/renderer.js";
 
 export const SERVER_NAME = "codex-zcode-bridge";
@@ -57,6 +58,9 @@ export interface BridgeServerOptions {
   /** Opt-in project task ledger (C1-C3). Absent = disabled: the frozen core
    * tools behave exactly as before and no ledger data is ever created. */
   ledger?: import("../ledger/mcp.js").LedgerToolOptions;
+  /** Opt-in scheduled goals (ADR-010). Absent = disabled: the frozen core
+   * tools behave exactly as before and no schedule data is ever created. */
+  schedule?: import("../schedule/mcp.js").ScheduleToolOptions;
 }
 
 const EXECUTION_NOT_VERDICT =
@@ -279,6 +283,11 @@ export function createBridgeServer(options: BridgeServerOptions): McpServer {
   // Opt-in project task ledger tools (C1-C3); never registered by default.
   if (options.ledger) {
     registerLedgerTools(server, options.ledger);
+  }
+
+  // Opt-in scheduled goals (ADR-010); never registered by default.
+  if (options.schedule) {
+    registerScheduleTools(server, options.schedule);
   }
 
   // Temporary experiment tool: verify whether the calling host surfaces MCP progress notifications.

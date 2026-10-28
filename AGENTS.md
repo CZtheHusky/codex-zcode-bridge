@@ -38,5 +38,5 @@
 ## 提交与验证
 
 - 代码改动跑 `npm run typecheck`、`npm test`、`npm run build`、`npm run validate:plugin`，并保证 `git diff --check` 干净。
-- `plugins/codex-zcode-bridge/dist/bridge.mjs` 与 `worker/worker-main.mjs` 是提交物，必须与源码同步；CI 会校验它们没有落后。
+- `plugins/codex-zcode-bridge/dist/bridge.mjs`、`plugins/codex-zcode-bridge/worker/worker-main.mjs` 与 `plugins/codex-zcode-bridge/worker/schedule-runner.mjs` 是提交物，必须与源码同步；CI 会校验它们没有落后。
 - 不默认提交、推送或发布。发布走 release-please，合并到 `master` 之后由它生成版本 PR。

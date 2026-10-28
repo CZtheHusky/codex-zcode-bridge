@@ -37,6 +37,7 @@ function extractReportCandidate(value: unknown): Partial<AgentReport> | null {
   if (isStringArray(value["files_changed"])) candidate.files_changed = value["files_changed"];
   if (isStringArray(value["issues"])) candidate.issues = value["issues"];
   if (typeof value["needs_master_decision"] === "boolean") candidate.needs_master_decision = value["needs_master_decision"];
+  if (typeof value["acceptance_met"] === "boolean") candidate.acceptance_met = value["acceptance_met"];
   if (Array.isArray(value["tests"])) {
     const tests: TestReport[] = [];
     for (const entry of value["tests"]) {
@@ -83,6 +84,13 @@ export function validateAgentReport(
   if (typeof needsMasterDecision !== "boolean") {
     return { ok: false, error: "report.needs_master_decision must be a boolean" };
   }
+  // ADR-010: acceptance_met is optional, but a PRESENT non-boolean value is an
+  // invalid report (invalid_agent_report) rather than a silent "unassessed";
+  // the scheduler must never guess a self-assessment from malformed evidence.
+  if (value["acceptance_met"] !== undefined && typeof value["acceptance_met"] !== "boolean") {
+    return { ok: false, error: "report.acceptance_met must be a boolean when present" };
+  }
+  const acceptanceMet = value["acceptance_met"];
   return {
     ok: true,
     report: {
@@ -91,6 +99,7 @@ export function validateAgentReport(
       tests,
       issues,
       needs_master_decision: needsMasterDecision,
+      ...(acceptanceMet === undefined ? {} : { acceptance_met: acceptanceMet }),
     },
   };
 }

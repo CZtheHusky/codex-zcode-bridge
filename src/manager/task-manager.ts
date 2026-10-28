@@ -1002,6 +1002,11 @@ export class BridgeTaskManager implements ProgressTaskManager {
           return { task_id: taskId, status: status.status === "running" ? "running" : "queued", created_at: status.created_at };
         }
       }
+      // A normal zcode_continue can advance a scheduled task before its review arrives;
+      // without this comparison stale feedback could start another, unrelated attempt.
+      if (input.expected_attempt !== undefined && input.expected_attempt !== status.attempt) {
+        throw new TaskManagerError("TASK_STATE", `Expected attempt ${input.expected_attempt}; current attempt is ${status.attempt}`);
+      }
       if (!["completed", "failed", "waiting_for_master"].includes(status.status)) {
         throw new TaskManagerError(
           "TASK_STATE",

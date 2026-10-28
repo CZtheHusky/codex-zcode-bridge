@@ -36,6 +36,7 @@ function extractReportCandidate(value) {
   if (isStringArray(value["files_changed"])) candidate.files_changed = value["files_changed"];
   if (isStringArray(value["issues"])) candidate.issues = value["issues"];
   if (typeof value["needs_master_decision"] === "boolean") candidate.needs_master_decision = value["needs_master_decision"];
+  if (typeof value["acceptance_met"] === "boolean") candidate.acceptance_met = value["acceptance_met"];
   if (Array.isArray(value["tests"])) {
     const tests = [];
     for (const entry of value["tests"]) {
@@ -79,6 +80,10 @@ function validateAgentReport(value) {
   if (typeof needsMasterDecision !== "boolean") {
     return { ok: false, error: "report.needs_master_decision must be a boolean" };
   }
+  if (value["acceptance_met"] !== void 0 && typeof value["acceptance_met"] !== "boolean") {
+    return { ok: false, error: "report.acceptance_met must be a boolean when present" };
+  }
+  const acceptanceMet = value["acceptance_met"];
   return {
     ok: true,
     report: {
@@ -86,7 +91,8 @@ function validateAgentReport(value) {
       files_changed: filesChanged,
       tests,
       issues,
-      needs_master_decision: needsMasterDecision
+      needs_master_decision: needsMasterDecision,
+      ...acceptanceMet === void 0 ? {} : { acceptance_met: acceptanceMet }
     }
   };
 }
@@ -22739,6 +22745,7 @@ function createDefaultBrowserBackendFactory(options) {
 }
 
 // src/adapters/zcode-app-server-adapter.ts
+var USAGE_EXHAUSTED_MESSAGE = "ZCode \u63D0\u4F9B\u65B9\u660E\u786E\u62A5\u544A\u7528\u91CF\u989D\u5EA6\u5DF2\u8017\u5C3D\uFF1B\u5F53\u524D\u6267\u884C\u5DF2\u4E2D\u65AD\u3002\u8BF7\u7ACB\u5373\u505C\u6B62\u5F53\u524D\u4EFB\u52A1\u5E76\u544A\u77E5\u7528\u6237\uFF1B\u4E0D\u8981\u7EE7\u7EED\u5DE5\u4F5C\u3001\u81EA\u52A8\u91CD\u8BD5\u6216\u7EED\u4F5C\uFF0C\u7B49\u5F85\u7528\u6237\u786E\u8BA4\u989D\u5EA6\u6062\u590D\u540E\u518D\u7EE7\u7EED\u3002";
 function publicUsage(value) {
   if (!isRecord2(value)) return null;
   const result = {};
@@ -23611,8 +23618,8 @@ var ZCodeAppServerAdapter = class {
       clearTimeout(call.timer);
       pending.delete(id);
       if (message.error && typeof message.error === "object") {
-        const error62 = message.error;
-        call.reject(new Error(`ZCode app-server request failed for ${call.method}${typeof error62.code === "number" ? ` (code ${error62.code})` : ""}`));
+        const error62 = asRecord2(message.error);
+        call.reject(providerReportedUsageExhaustion(error62, entry.selectedModelSelection?.providerId ?? null) ? new BridgeError("zcode_usage_exhausted", USAGE_EXHAUSTED_MESSAGE) : new Error(`ZCode app-server request failed for ${call.method}${typeof error62.code === "number" ? ` (code ${error62.code})` : ""}`));
       } else {
         call.resolve(message.result);
       }
@@ -23661,11 +23668,8 @@ var ZCodeAppServerAdapter = class {
       if (type === "turn.failed") {
         entry.acceptingTurn = false;
         entry.turnCompletedAt = this.#now().toISOString();
-        const quotaExhausted = providerReportedUsageExhaustion(payload.error);
-        const failure2 = quotaExhausted ? new BridgeError(
-          "zcode_usage_exhausted",
-          "ZCode \u63D0\u4F9B\u65B9\u660E\u786E\u62A5\u544A\u7528\u91CF\u989D\u5EA6\u5DF2\u8017\u5C3D\uFF1B\u5F53\u524D\u6267\u884C\u5DF2\u4E2D\u65AD\u3002\u8BF7\u7ACB\u5373\u505C\u6B62\u5F53\u524D\u4EFB\u52A1\u5E76\u544A\u77E5\u7528\u6237\uFF1B\u4E0D\u8981\u7EE7\u7EED\u5DE5\u4F5C\u3001\u81EA\u52A8\u91CD\u8BD5\u6216\u7EED\u4F5C\uFF0C\u7B49\u5F85\u7528\u6237\u786E\u8BA4\u989D\u5EA6\u6062\u590D\u540E\u518D\u7EE7\u7EED\u3002"
-        ) : new Error("ZCode turn failed");
+        const quotaExhausted = providerReportedUsageExhaustion(payload.error, entry.selectedModelSelection?.providerId ?? null);
+        const failure2 = quotaExhausted ? new BridgeError("zcode_usage_exhausted", USAGE_EXHAUSTED_MESSAGE) : new Error("ZCode turn failed");
         this.#publishSessionEvent(type, payload, entry, params, quotaExhausted ? "zcode_usage_exhausted" : "zcode_nonzero_exit");
         entry.rejectTurn(failure2);
         return;
@@ -24117,17 +24121,31 @@ function nestedNumber(record2, path8) {
 function asRecord2(value) {
   return isRecord2(value) ? value : {};
 }
-function providerReportedUsageExhaustion(value) {
+function providerReportedUsageExhaustion(value, selectedProviderId) {
   const error62 = asRecord2(value);
+  const attribution = asRecord2(error62.attribution);
+  const codes = [error62.code, error62.type, attribution.providerErrorCode].filter((code) => typeof code === "string").map((code) => code.slice(0, 160).toLowerCase());
+  if (codes.some((code) => [
+    "insufficient_quota",
+    "credit_balance_exhausted",
+    "organization_spend_limit_exceeded",
+    "project_spend_limit_exceeded",
+    "organization_usage_limit_exceeded",
+    "exceeded_current_quota_error"
+  ].includes(code))) return true;
+  const providerId = typeof attribution.providerId === "string" ? attribution.providerId : selectedProviderId;
+  if (providerId && /^(?:(?:account|builtin):)?(?:bigmodel|zai|zhipu)(?:$|[-:])/i.test(providerId) && codes.some((code) => ["1113", "1308", "1310", "1316", "1317", "1318", "1319", "1320", "1321"].includes(code))) return true;
   const candidates = [
-    typeof value === "string" ? value : null,
-    typeof error62.code === "string" ? error62.code : null,
-    typeof error62.type === "string" ? error62.type : null,
-    typeof error62.message === "string" ? error62.message : null
-  ].filter((candidate) => candidate !== null).map((candidate) => candidate.slice(0, 2048));
-  if (candidates.length === 0) return false;
-  const text = candidates.join("\n").normalize("NFKC").toLowerCase();
-  return [
+    value,
+    error62.code,
+    error62.type,
+    error62.message,
+    error62.detail,
+    error62.underlyingErrorMessage,
+    error62.underlyingErrorDetail,
+    attribution.providerErrorCode
+  ].filter((candidate) => typeof candidate === "string").map((candidate) => candidate.slice(0, 2048).normalize("NFKC").toLowerCase());
+  return candidates.some((text) => [
     /\binsufficient[_\s-]+quota\b/,
     /\bquota[_\s-]+(?:(?:has[_\s-]+been)[_\s-]+)?(?:exceeded|exhausted|depleted)\b/,
     /\b(?:usage|token)[_\s-]+quota[_\s-]+(?:exceeded|exhausted|depleted)\b/,
@@ -24135,11 +24153,13 @@ function providerReportedUsageExhaustion(value) {
     /\b(?:out[_\s-]+of|no[_\s-]+remaining|insufficient[_\s-]+)(?:[_\s-]+)?credits?\b/,
     /\bcredits?[_\s-]+(?:exhausted|depleted)\b/,
     /\bbilling[_\s-]+hard[_\s-]+limit[_\s-]+reached\b/,
+    /\b(?:weekly|monthly)(?:\/(?:weekly|monthly))?[_\s-]+limit[_\s-]+exhausted\b/,
     /(?:用量|额度|配额)(?:已|已经)?(?:用尽|耗尽|用完|不足)/,
     /(?:用尽|耗尽|用完|不足)(?:了)?(?:用量|额度|配额)/,
     /(?:超出|超过)(?:了)?(?:当前)?(?:用量|额度|配额)/,
-    /(?:当前)?(?:用量|额度|配额)(?:已经)?(?:超出|不足)/
-  ].some((pattern) => pattern.test(text));
+    /(?:当前)?(?:用量|额度|配额)(?:已经)?(?:超出|不足)/,
+    /(?:已(?:经)?达到|已达|超出|超过)[^\n]{0,32}(?:使用|用量|消费)上限/
+  ].some((pattern) => pattern.test(text)));
 }
 async function syncDesktopStatus(entry, status, onEvent) {
   if (!entry) return;
@@ -24243,7 +24263,8 @@ function buildTaskResult(input2) {
     files_changed: report.files_changed,
     tests: report.tests,
     issues: report.issues,
-    needs_master_decision: report.needs_master_decision
+    needs_master_decision: report.needs_master_decision,
+    ...report.acceptance_met === void 0 ? {} : { acceptance_met: report.acceptance_met }
   };
 }
 function truncate(text, maxChars) {
@@ -24825,6 +24846,27 @@ var TaskStore = class {
       }
     }
     return newest;
+  }
+  /** Pending interaction requests for the current attempt, oldest first.
+   * Public request ids are attempt-prefixed ("<attempt>:<runtime id>"), so a
+   * monitor can wake a host exactly once per still-pending request. */
+  listPendingInteractions(taskId2, max = 16) {
+    const directory = path7.join(this.taskDir(taskId2), "interactions");
+    const prefix = `${this.readStatus(taskId2).attempt}-`;
+    let entries;
+    try {
+      entries = readdirSync(directory);
+    } catch (error62) {
+      if (error62 instanceof Error && "code" in error62 && error62.code === "ENOENT") return [];
+      throw error62;
+    }
+    const records = [];
+    for (const file2 of entries.filter((entry) => entry.startsWith(prefix) && entry.endsWith(".json"))) {
+      const record2 = JSON.parse(readFileSync4(path7.join(directory, file2), "utf8"));
+      if (record2.state === "pending") records.push({ request_id: record2.request_id, method: record2.method, created_at: record2.created_at });
+    }
+    records.sort((a, b) => a.created_at.localeCompare(b.created_at));
+    return records.slice(0, max);
   }
   // ---- B3 attempt-scoped observation snapshot (fenced writer) ----
   /**

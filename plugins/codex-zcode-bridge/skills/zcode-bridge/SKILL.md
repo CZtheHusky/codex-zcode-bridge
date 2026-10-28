@@ -1,18 +1,37 @@
 ---
 name: zcode-bridge
-description: 通过 Codex ZCode Bridge 把已授权的开发任务交给本机 ZCode，跟进实时进度、选择模型、按需要由 Codex 准备 worktree、审查改动并决定如何接收。
+description: 通过 Codex ZCode Bridge 把已授权的开发任务交给本机 ZCode，立即派发或预约启动，安静续作、跟进进度、独立验收，并决定如何接收。
 ---
 
 # Zcode Bridge
+
+> Status: AUTHORITATIVE
+> Last updated: 2026-10-28
+> Last verified: 2026-10-28，静态核对调度工具/schema、静默推进及独立验收指令，并核对本机 systemd 255 / MCP / Bridge worker 的 8 项离线闭环实测证据（执行器和 App 接收端为 fixture，无模型调用）；另已完成本机真实 ZCode 自评/续作、当前 App 消息送达与 Codex 独立验收；新版调度在对话空闲时启动新轮次仍未验证，详见 ADR-010。
+> Verified against: 0e74ee1c64b179752a24317574916a98c77a5ef1 + 当前 working tree（ADR-010 调度相关源码）。
 
 你是 Master，ZCode 是执行一个有明确边界任务的 worker。仅委派用户已授权的实现工作。不同执行目录可并发；不得让 Codex 与 ZCode 同时修改同一个实际执行目录。Bridge 会串行化共享执行目录的任务。
 
 ## 持续目标
 
+本节用于当前聊天立即执行的持续委派。用户要求预约启动时使用下节调度工具，由持久调度器负责等待与续作；不要用当前轮长时间等待、活跃 Goal 反复轮询或另建周期自动化代替预约监督。
+
 - 用户明确要求跨轮持续推进，例如“持续做到项目完成或我让你停止”时，把它视为当前 Codex 线程的长期目标；在派发首个 ZCode 任务前调用 `create_goal`，不要只在普通回复里复述持续意图。目标写明用户授权的最终结果、独立审查/验证要求、接收改动的条件，以及用户叫停或必须等待用户决定时的停止条件。不得借此扩大用户授权；除非用户明确指定，不设置 Goal token budget。
 - 单次、有明确边界的委派或一次性问答不创建 Goal。若当前环境没有 Goal 工具，明确告知用户无法启用持久续行，不要声称已经创建。
 - Goal 属于当前线程。保持它活动，直到最终目标经证据核验完成；Bridge 的 `completed`、ZCode 的完成报告或“任务仍在运行”都不单独满足完成条件。只有所有必要任务终态、改动完成独立审查和适用验证、授权范围内的改动已接收到目标工作区，才可完成 Goal。
 - 若 Codex 当前轮结束时 Bridge 任务仍在运行，保留活动 Goal 并说明当前状态，让 Goal 在可继续时接手轮询；不要把中间状态作为最终结论或自行暂停 Goal。用户要求停止时遵从其指示。
+
+## 预约启动与安静验收
+
+1. 用户要求未来某时开始并持续做到验收通过时，使用 `zcode_schedule`。一次预约对应一个目标和 task ID，不定期创建新任务。先按“派发”准备完整 TaskPackage 和现存执行目录；把验收标准与关键约束写进要求。开始时间用含秒与时区的 ISO 8601 `start_at`（如 `2026-10-29T09:00:00-07:00`）；时间或时区有实质歧义先澄清。
+2. 必须把用户授权的原本机 Codex 聊天 UUID 显式写入 `thread_id`，只从当前宿主上下文取得（宿主提供时可用当前 `CODEX_THREAD_ID`）。不知道原聊天 ID 就停止预约并说明缺失，不从别的进程环境、其他聊天或任务 ID 猜测。不要把 App pipe 地址或秘密放进 TaskPackage、context 或 ZCode prompt。
+3. 调用 `zcode_schedule({ task, start_at, thread_id })`，检查回执的开始时间、绑定聊天、监督 unit 与 log_path。首版仅支持可用 Linux user systemd（systemd 254 起，须支持 `--expand-environment=no`）和 Codex App tools pipe；不支持时报告具体失败，不用 PTY、当前聊天、无监管后台进程或新建自动化假装替代。回执丢失用相同 task ID 与相同完整请求查询/重试。预约返回后简短确认并结束本轮，等待调度唤醒；本节不套用普通立即任务“马上读 events 并连续报告进度”的步骤。
+4. 正常运行和 completed + `acceptance_met=false` 由调度器静默继续同 task/session，不轮询当前聊天，不通知用户。调度器只向调度 prompt 强制请求可选 boolean `acceptance_met`；这是 ZCode 自评，绝不等于 Codex 验收通过。timeout 仅在保存了 session 且清理验证通过后自动续作。
+5. 收到调度唤醒后，先用 `zcode_schedule_status` 核对 event ID、当前 attempt、attention 和 `attempt_under_review`，再读取 `zcode_status` / `zcode_result` / 必要事件。通知至少一次交付，可能重复；已处理的事件、已取消/接受目标或旧 attempt 只核对状态，不重复验收或续作。App 消息送达也不是完成证据。
+6. awaiting_review 时按照“审查与接收改动”检查实际 diff、执行适用验证并处理已授权的改动接收；不能只相信 completed、acceptance_met=true 或 worker 的 passed 自报。通过后对**当前待验收 attempt**调用 `zcode_schedule_review({ task_id, attempt, accepted: true })`，确认目标为 accepted，再通知用户验收结果和证据。未通过则调用 `accepted: false` 并给 `feedback`：具体失败、证据、期望行为与尚缺验收项；由调度器复用同 session 续作，普通返工保持安静。不要用新的 task ID 或普通 `zcode_continue` 替代这个 review 判定。
+7. 权限/输入、needs_master_decision、缺失或无效自评、失败、额度耗尽与清理未确认只唤醒 Codex 判断，不自动批准或盲目重试。先用权威状态与已有授权处理能确定的事项；确需新增权限、关键决定或用户处理的问题再通知用户。权限仍遵守下文明确授权规则；额度耗尽立即停止并告知用户，等用户确认恢复；cleanup 未确认不能续作。不是 awaiting_review 的问题不能伪造 review 通过。
+8. 用户取消时调用 `zcode_schedule_cancel`，确认持久停止意图、目标状态与执行清理；只调 `zcode_cancel` 不会关闭预约目标。MCP 调用中断后由 runner 恢复取消；收到 `cancel_failed` 时核对目标 failed 且 `cancel_requested=true`，确认自动续作与清理重试已暂停，处理清理问题，确需人决定时通知用户，不自动无限重试。通知失败或清理失败须如实报告，不把它们写成已通过。正常进展、未达标续作和验收拒绝不通知人，仅验收通过或关键问题需处理时通知。
+9. App 唤醒适配仅为 Observed Linux App 26.1016.61520 / codex-app-tools 0.1.6 内部接口，无公开跨版本保证。本机 systemd 255 / MCP / Bridge worker 的 8 项离线闭环实测已通过（执行器和 App 接收端为 fixture，无模型调用），历史原聊天唤醒实测另列；本机真实 ZCode 自评/续作、App 消息送达和 Codex 独立验收已通过；新版调度在聊天空闲时启动新轮次仍未验证。不自动修改 provider 配置、安装插件、提交、推送或发布。
 
 ## 派发
 
@@ -50,7 +69,7 @@ description: 通过 Codex ZCode Bridge 把已授权的开发任务交给本机 Z
 - 每个任务通过本机 ZCode app-server 运行；默认模式为 `yolo`，也可通过 `ZCODE_BRIDGE_MODE` 配置。`yolo` 会放行普通工具操作。记录版本上已完成单次 43,014-byte Write 的真实权限审批往返实测；其他审批组合未据此认证。告知用户实际执行模式和当前账户权限边界，不要把 worktree 描述成沙箱。
 - `workspace` 是项目身份路径；`worktree_path`（如提供）是实际执行路径。Codex 决定是否准备 worktree，Bridge 只校验并使用所给路径。Git worktree 是工作区隔离，不是 OS 沙箱。allowed_paths / forbidden_paths 是 worker 指令；不得声称它们能强制阻止所有越界命令。
 - ZCode 不得选择仍未解决的 `OPEN DECISIONS`；后续 Master Feedback 明确给出决定后，按新决定继续。即使未列出，遇到需求冲突或会实质改变外部行为的缺失决定，也要提出具体问题、设置 `needs_master_decision=true`，并继续不依赖该决定的工作。低影响实现选择可采用最简单一致的方案，同时报告假设。
-- 不要把 ZCode Hooks、Desktop 历史索引、自动化或并行 worker 当作已启用能力。
+- 不要把 ZCode Hooks、Desktop 历史索引或并行 worker 当作已启用能力。预约只使用上述显式调度入口，不把它扩展成周期自动化或其他宿主已启用能力。
 - 不要为了方便而修改 ZCode provider 配置或将凭据写入任务 prompt、日志或仓库。
 
 ## 结果反馈格式（适合人来判读）

@@ -15,6 +15,28 @@ import { resolveDataRoot, resolveMaxConcurrentWorkers } from "../src/mcp/main.js
 const MAIN_JS = fileURLToPath(new URL("../src/mcp/main.js", import.meta.url));
 const PLUGIN_ROOT = fileURLToPath(new URL("../../plugins/codex-zcode-bridge/", import.meta.url));
 
+for (const { name, runner } of [
+  { name: "compiled scheduler", runner: fileURLToPath(new URL("../src/schedule/runner-main.js", import.meta.url)) },
+  { name: "bundled scheduler", runner: path.join(PLUGIN_ROOT, "worker", "schedule-runner.mjs") },
+]) {
+  test(`${name} entry loads from a clean environment before reporting missing arguments`, () => {
+    const home = mkdtempSync(path.join(tmpdir(), "zcode-bridge-scheduler-entry-"));
+    try {
+      const run = spawnSync(process.execPath, [runner], {
+        cwd: home,
+        encoding: "utf8",
+        env: { PATH: process.env["PATH"], HOME: home, USERPROFILE: home, SystemRoot: process.env["SystemRoot"] },
+        timeout: 5_000,
+      });
+      assert.equal(run.status, 2, `stderr: ${run.stderr}`);
+      assert.equal(run.stdout, "");
+      assert.match(run.stderr, /usage: node schedule-runner\.mjs <dataRoot> <taskId>/u);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+}
+
 const PROTOCOL_MESSAGES = [
   JSON.stringify({
     jsonrpc: "2.0",
@@ -67,6 +89,9 @@ test("compiled stdio entry speaks pure JSON-RPC on stdout and diagnostics on std
     )
       .map((tool) => tool.name)
       .sort();
+    // The default Codex host composes the ADR-010 scheduler; a createBridgeServer
+    // consumer that injects no scheduling sees only the 13 frozen core tools
+    // (covered by mcp-server tests).
     assert.deepEqual(toolNames, [
       "zcode_cancel",
       "zcode_clear_default_model",
@@ -78,6 +103,10 @@ test("compiled stdio entry speaks pure JSON-RPC on stdout and diagnostics on std
       "zcode_interaction_reply",
       "zcode_model_catalog",
       "zcode_result",
+      "zcode_schedule",
+      "zcode_schedule_cancel",
+      "zcode_schedule_review",
+      "zcode_schedule_status",
       "zcode_set_default_model",
       "zcode_status",
       "zcode_task",
@@ -129,7 +158,7 @@ test("marketplace bundle starts from its plugin root without repo-local dependen
     const toolsList = messages.find((message) => message.id === 2)?.result;
     const toolNames = ((toolsList?.["tools"] as Array<{ name: string }> | undefined) ?? []).map((tool) => tool.name).sort();
     assert.deepEqual(toolNames, [
-      "zcode_cancel", "zcode_clear_default_model", "zcode_continue", "zcode_default_model", "zcode_doctor", "zcode_events", "zcode_feedback", "zcode_interaction_reply", "zcode_model_catalog", "zcode_result", "zcode_set_default_model", "zcode_status", "zcode_task",
+      "zcode_cancel", "zcode_clear_default_model", "zcode_continue", "zcode_default_model", "zcode_doctor", "zcode_events", "zcode_feedback", "zcode_interaction_reply", "zcode_model_catalog", "zcode_result", "zcode_schedule", "zcode_schedule_cancel", "zcode_schedule_review", "zcode_schedule_status", "zcode_set_default_model", "zcode_status", "zcode_task",
     ]);
     assert.ok(existsSync(path.join(PLUGIN_ROOT, "worker", "worker-main.mjs")), "detached worker bundle must ship beside the MCP server");
     assert.match(run.stderr, /data root/);

@@ -139,6 +139,10 @@ export interface TaskResult {
   model?: ExecutionProfile | null;
   /** B4 additive: bounded phase timings with explicit boundaries. */
   timing?: AttemptTiming | null;
+  /** ADR-010 additive: the agent's own acceptance self-assessment from the
+   * report, when the report provided one. Absent means not assessed; this is
+   * never the calling host's independent acceptance decision. */
+  acceptance_met?: boolean;
 }
 
 export interface WorkspaceRef {
@@ -216,6 +220,11 @@ export interface AgentReport {
   tests: TestReport[];
   issues: string[];
   needs_master_decision: boolean;
+  /** ADR-010 additive: the subordinate's own boolean assessment of whether
+   * the task's acceptance criteria are met. Optional and never synthesized:
+   * absent means "not assessed" (old tasks, infrastructure failures). This is
+   * a self-assessment, never the calling host's independent PASS. */
+  acceptance_met?: boolean;
 }
 
 export interface TaskReceipt {
@@ -340,6 +349,8 @@ export interface ContinueTaskInput {
   additional_requirements?: string[];
   /** Stable id for retrying one continuation after a lost response. */
   operation_id?: string;
+  /** Scheduled feedback must apply to the attempt that was actually reviewed. */
+  expected_attempt?: number;
 }
 
 export interface GetEventsInput {

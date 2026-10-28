@@ -4,7 +4,7 @@ import path from "node:path";
 import type { ZCodeRuntimeConfig } from "../src/interfaces.js";
 import { TEMP_TREE_REMOVE_OPTIONS, validReport } from "./helpers.js";
 
-export async function runtimeFixture(options: { interaction?: boolean; replay?: boolean; output?: string; fail?: boolean; cancel?: boolean } = {}) {
+export async function runtimeFixture(options: { interaction?: boolean; replay?: boolean; output?: string; fail?: boolean; failure?: unknown; cancel?: boolean } = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "bridge-regression-"));
   const home = path.join(root, "home");
   const settingsDirectory = path.join(home, ".test-host", "bridge");
@@ -21,7 +21,7 @@ export async function runtimeFixture(options: { interaction?: boolean; replay?: 
     const out=x=>process.stdout.write(JSON.stringify(x)+'\\n');
     const event=(seq,type,payload,sessionId='current-session')=>out({method:'session/event',params:{sessionId,seq,type,payload}});
     const snapshot=()=>({session:{sessionId:'current-session'},settings:{model:{current:{providerId:'fake',modelId:'fake'},available:[{ref:{providerId:'fake',modelId:'fake'},label:'Fake model',contextWindow:1234}]}},runtime:{eventSeq:20}});
-    function finish(){if(opts.fail){event(24,'turn.failed',{error:{message:'PRIVATE_RUNTIME_ERROR'}});return;} event(24,'turn.completed',{turnId:'current-turn',response:JSON.stringify(report),resultType:opts.cancel?'cancelled':'success',usage:{totalTokens:9,reasoning:{text:'PRIVATE_REASONING'},debug:'PRIVATE_METADATA'}});}
+    function finish(){if(opts.fail||opts.failure){event(24,'turn.failed',{error:opts.failure??{message:'PRIVATE_RUNTIME_ERROR'}});return;} event(24,'turn.completed',{turnId:'current-turn',response:JSON.stringify(report),resultType:opts.cancel?'cancelled':'success',usage:{totalTokens:9,reasoning:{text:'PRIVATE_REASONING'},debug:'PRIVATE_METADATA'}});}
     rl.on('line',line=>{const m=JSON.parse(line);fs.appendFileSync(${JSON.stringify(log)},JSON.stringify(m)+'\\n');
       if(m.method==='session/create'||m.method==='session/resume')out({id:m.id,result:snapshot()});
       else if(m.method==='session/subscribe'){out({id:m.id,result:{}});if(opts.replay)event(21,'turn.completed',{response:'PRIVATE_REPLAY',resultType:'success'});}

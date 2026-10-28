@@ -43,6 +43,7 @@ for (const [label, mcp] of [["mcp.json", portableMcp], [".mcp.json", codexMcp]])
 for (const relativePath of [
   "dist/bridge.mjs",
   "worker/worker-main.mjs",
+  "worker/schedule-runner.mjs",
   "worker/vendor/pkg/browser-host.cjs",
   "worker/vendor/browsers.json",
   "worker/vendor/package.json",
@@ -61,13 +62,13 @@ for (const relativePath of [
 // its own directory (module-label comments inside the bundle legitimately
 // mention the packaging path and are not an external dependency).
 const repoRootPattern = buildRepoRootLeakPattern(root);
-for (const relativePath of ["dist/bridge.mjs", "worker/worker-main.mjs", "worker/vendor/pkg/browser-host.cjs"]) {
+for (const relativePath of ["dist/bridge.mjs", "worker/worker-main.mjs", "worker/schedule-runner.mjs", "worker/vendor/pkg/browser-host.cjs"]) {
   const bundle = await readFile(path.join(pluginRoot, relativePath), "utf8");
   if (repoRootPattern.test(bundle)) {
     throw new Error(`${relativePath} embeds the development repository's absolute path`);
   }
 }
-for (const relativePath of ["dist/bridge.mjs", "worker/worker-main.mjs"]) {
+for (const relativePath of ["dist/bridge.mjs", "worker/worker-main.mjs", "worker/schedule-runner.mjs"]) {
   const bundle = await readFile(path.join(pluginRoot, relativePath), "utf8");
   if (/(?:from|import)\s*["']playwright-core["']/u.test(bundle)) {
     throw new Error(`${relativePath} statically imports playwright-core; the browser backend must load through the vendored bundle`);

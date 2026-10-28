@@ -72,6 +72,7 @@ export const zcodeModelCatalogInputSchema = z.strictObject({
   workspace: z.string().trim().min(1),
 });
 
+
 export const zcodeDefaultModelInputSchema = z.strictObject({
   provider_id: z.string().trim().min(1),
   model_id: z.string().trim().min(1),
@@ -194,10 +195,12 @@ export const taskResultSchema = z.object({
     tests: z.array(testReportSchema).optional(),
     issues: z.array(z.string()).optional(),
     needs_master_decision: z.boolean().optional(),
+    acceptance_met: z.boolean().optional(),
   }).optional(),
   usage: normalizedUsageSchema.nullable().optional(),
   model: executionProfileSchema.nullable().optional(),
   timing: attemptTimingSchema.nullable().optional(),
+  acceptance_met: z.boolean().optional(),
 });
 
 const taskProgressEventSchema = z.object({
@@ -309,4 +312,119 @@ const modelSelectionSchema = z.object({
 export const defaultModelSchema = z.object({
   configured: z.boolean(),
   model: modelSelectionSchema.nullable(),
+});
+
+// ---- ADR-010 scheduling tools (opt-in via createBridgeServer options) ----
+
+const START_AT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/u;
+const THREAD_ID_PATTERN = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/u;
+
+export const zcodeScheduleInputSchema = z.strictObject({
+  task: zcodeTaskInputSchema,
+  start_at: z.string().regex(START_AT_PATTERN, "start_at must be an ISO 8601 datetime carrying a timezone offset (Z or ±HH:MM)"),
+  thread_id: z.string().regex(THREAD_ID_PATTERN, "thread_id must be the UUID of the original Codex chat that will receive wakeups"),
+});
+
+export const zcodeScheduleStatusInputSchema = z.strictObject({
+  task_id: taskIdSchema,
+});
+
+export const zcodeScheduleReviewInputSchema = z.strictObject({
+  task_id: taskIdSchema,
+  attempt: z.number().int().positive(),
+  accepted: z.boolean(),
+  feedback: z.string().min(1).max(8_000).optional(),
+});
+
+export const zcodeScheduleCancelInputSchema = z.strictObject({
+  task_id: taskIdSchema,
+});
+
+const scheduleSupervisorInfoSchema = z.object({
+  unit: z.string(),
+  log_path: z.string(),
+});
+
+const scheduleGoalStatusSchema = z.enum([
+  "scheduled",
+  "dispatched",
+  "awaiting_review",
+  "accepted",
+  "cancelled",
+  "failed",
+]);
+
+export const scheduleReceiptSchema = z.object({
+  task_id: z.string(),
+  status: scheduleGoalStatusSchema,
+  start_at: z.string(),
+  thread_id: z.string(),
+  created_at: z.string(),
+  supervisor: scheduleSupervisorInfoSchema.nullable(),
+});
+
+export const scheduleStatusSchema = z.object({
+  task_id: z.string(),
+  schedule: z.object({
+    status: scheduleGoalStatusSchema,
+    start_at: z.string(),
+    thread_id: z.string(),
+    created_at: z.string(),
+    updated_at: z.string(),
+    cancel_requested: z.boolean(),
+    supervisor: scheduleSupervisorInfoSchema.nullable(),
+    failure_reason: z.string().nullable(),
+  }),
+  execution: z.object({
+    status: z.enum(["queued", "running", "completed", "failed", "cancelled", "waiting_for_master"]),
+    attempt: z.number().int(),
+    error_code: z.string().optional(),
+    needs_master_decision: z.boolean().nullable(),
+    acceptance_met: z.boolean().optional(),
+  }).nullable(),
+  goal: z.object({
+    attention: z.object({
+      reason: z.string(),
+      attempt: z.number().int(),
+      event_id: z.string(),
+      set_at: z.string(),
+      detail: z.string().optional(),
+    }).nullable(),
+    attempt_under_review: z.number().int().nullable(),
+    review: z.object({
+      attempt: z.number().int(),
+      accepted: z.boolean(),
+      feedback: z.string().optional(),
+      reviewed_at: z.string(),
+      operation_id: z.string(),
+      outcome: z.enum(["accepted", "continued"]),
+    }).nullable(),
+  }),
+  notifications: z.array(z.object({
+    event_id: z.string(),
+    reason: z.string(),
+    attempt: z.number().int(),
+    delivery: z.object({
+      state: z.enum(["pending", "sent", "failed", "superseded"]),
+      attempts: z.number().int(),
+      last_error: z.string().optional(),
+      last_attempt_at: z.string().optional(),
+      next_retry_at: z.string().optional(),
+      sent_at: z.string().optional(),
+    }),
+  })),
+});
+
+export const scheduleReviewResultSchema = z.object({
+  task_id: z.string(),
+  attempt: z.number().int().positive(),
+  accepted: z.boolean(),
+  action: z.enum(["accepted", "continued"]),
+  receipt: taskReceiptSchema.optional(),
+});
+
+export const scheduleCancelResultSchema = z.object({
+  task_id: z.string(),
+  schedule_status: scheduleGoalStatusSchema,
+  task_status: z.enum(["queued", "running", "completed", "failed", "cancelled", "waiting_for_master"]).nullable(),
 });

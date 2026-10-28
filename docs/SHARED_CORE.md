@@ -1,9 +1,11 @@
 # 共享核心与宿主适配
 
 > Status: AUTHORITATIVE
-> Last updated: 2026-10-16
-> Last verified: 2026-10-16，仅核对本次新增的浏览器后端打包分层说明；其余条目仍未逐条核对
-> Verified against: 183611e9c9bfc619b543933c7ad7204b2f646ea2（加载与构建源码，本次未改动）
+> Last updated: 2026-10-28
+> Last verified: 2026-10-28，静态核对本次 createBridgeServer 的可选调度注入与默认 Codex stdio 装配；另核对本机 systemd 255 / MCP / Bridge worker 的 8 项离线闭环实测证据（执行器和 App 接收端为 fixture、无模型调用），详见 [ADR-010](decisions/ADR-010-scheduled-zcode-and-codex-wakeup.md#当前验证边界2026-10-28)。另已完成本机真实 ZCode 自评/续作、当前 App 消息送达与 Codex 独立验收；新版调度在对话空闲时启动新轮次仍未验证，详见 ADR-010。
+> Verified against: 0e74ee1c64b179752a24317574916a98c77a5ef1 + 当前 working tree（ADR-010 调度相关源码与同版 bundle 离线实测；仅上述范围）
+> Prior verification: 2026-10-16，仅核对本次新增的浏览器后端打包分层说明；其余条目仍未逐条核对
+> Prior verified against: 183611e9c9bfc619b543933c7ad7204b2f646ea2（加载与构建源码，本次未改动）
 
 Codex 与 dsh 连接同一个 ZCode 执行端，因此任务调度、存储、续跑、取消、结果归一化、ZCode 协议和 Desktop 索引属于共享核心。`src/adapters/` 适配 ZCode，不是调用宿主。
 
@@ -32,6 +34,10 @@ await startBridge({
 Codex 默认配置目录保持 `~/.codex/codex-zcode-bridge`。运行配置仍优先于环境变量。`legacySettingsDirectories` 仅在宿主明确配置时启用；缺文件才回退，存在但损坏的文件会报错。首次写入默认模型会复制完整 legacy 设置到宿主 canonical 文件，并保留未知字段；不会修改 legacy 文件。不要默认共享两个宿主的可变任务目录。
 
 公共 MCP 工具名称、schema 和业务语义由核心维护，宿主可传服务身份与 instructions。描述与 task prompt 使用调用宿主的中性措辞。`zcode_feedback` 是向后兼容的只读 snapshot 与文本 renderer；原有 `zcode_events`、`zcode_status` 和 `zcode_result` 保持原契约。`zcode_progress_probe` 是实验工具，默认关闭；只有直接调用 `createBridgeServer({ enableExperiments: true, ... })` 才启用。
+
+预约调度（[ADR-010](decisions/ADR-010-scheduled-zcode-and-codex-wakeup.md)）是可选组合层：`createBridgeServer` 只有收到 `schedule: { controller, appPipeSource? }` 才注册四个 `zcode_schedule*` 工具，不传时保持原 13 工具。默认 Codex `startBridge` 在 Codex profile 下装配 Linux systemd 监督器与 controller；不同名称的自定义宿主不会自动获得 Codex 私有 pipe。缺 systemd/App pipe 只影响预约调用，不阻断普通任务入口。
+
+调度策略与 `ScheduleNotifier.send` 注入点分开；App pipe 的实际发送仅在 Codex runner 适配器中实现。宿主显式提供当前原聊天 UUID 与发送通道，不能从别的进程猜线程，也不能把 pipe 传入 worker 或任务 prompt。调度模块目前未从 `core` 公共入口新增导出，不把内部模块路径宣称为稳定 fork 接入 API；需要自定义调度宿主时仍须明确维护自己的装配、监督器和发送适配。
 
 fork 接入顺序：构建并锁定本项目制品 → 用宿主入口替换公共模块中的路径/身份修改 → 将共享 worker 打入宿主制品 → 验证 stdio、任务执行、续跑、审批、模型缓存和自包含安装 → 独立发布。共享修复先进入本项目，fork 通过升级核心制品接收，避免长期各自修改任务核心。本轮只改造本项目，未修改 dsh，也未创建发布。
 

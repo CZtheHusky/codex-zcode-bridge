@@ -22,6 +22,7 @@ const shared = {
 await Promise.all([
   build({ ...shared, format: "esm", entryPoints: [path.join(repoRoot, "src", "mcp", "main.ts")], outfile: path.join(distDir, "bridge.mjs") }),
   build({ ...shared, format: "esm", entryPoints: [path.join(repoRoot, "src", "worker", "worker-main.ts")], outfile: path.join(workerDir, "worker-main.mjs") }),
+  build({ ...shared, format: "esm", entryPoints: [path.join(repoRoot, "src", "schedule", "runner-main.ts")], outfile: path.join(workerDir, "schedule-runner.mjs") }),
 ]);
 
 // The managed CDP browser backend ships as a CommonJS bundle next to the ESM

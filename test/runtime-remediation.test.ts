@@ -54,6 +54,36 @@ test("raw runtime failure messages never enter public progress", async () => {
   } finally { await fixture.cleanup(); }
 });
 
+test("five-hour quota failure reaches the worker result, status and events with a stop instruction", async () => {
+  const fixture = await runtimeFixture({ failure: {
+    type: "MODEL_RATE_LIMITED", message: "Model request failed", code: "1308",
+    attribution: { providerId: "account:bigmodel-individual-coding-plan", providerErrorCode: "1308" },
+    underlyingErrorDetail: "PRIVATE_PROVIDER_DETAIL",
+  } });
+  try {
+    const store = new TaskStore(fixture.root);
+    store.createTask(makeTask({ workspace: fixture.root }), new Date().toISOString());
+    const envBefore = { ...process.env };
+    Object.assign(process.env, fixture.env);
+    try { await runWorkerTask({ dataRoot: fixture.root, taskId: "task_1", attempt: 1, host: fixture.host }); }
+    finally { for (const key of Object.keys(process.env)) if (!(key in envBefore)) delete process.env[key]; Object.assign(process.env, envBefore); }
+    const result = store.readResult("task_1");
+    const status = store.readStatus("task_1");
+    const events = store.readEvents("task_1", 0, 200).events;
+    assert.equal(result?.status, "failed");
+    assert.equal(result.error_code, "zcode_usage_exhausted");
+    assert.equal(result.needs_master_decision, true);
+    assert.match(result.summary, /不要继续工作、自动重试或续作/);
+    assert.match(result.summary, /等待用户确认额度恢复/);
+    assert.equal(status.error_code, "zcode_usage_exhausted");
+    assert.equal(status.worker_pid, null);
+    assert.ok(events.some((event) => event.type === "turn_failed" && event.details?.error_code === "zcode_usage_exhausted"));
+    assert.doesNotMatch(JSON.stringify({ result, status, events }), /PRIVATE_PROVIDER_DETAIL/);
+    const requests = (await readFile(fixture.log, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.equal(requests.filter((request) => request.method === "session/send").length, 1, "exhaustion never causes an automatic retry");
+  } finally { await fixture.cleanup(); }
+});
+
 test("worker preserves every visible output character across multiple bounded events", async () => {
   const output = "可见输出🙂".repeat(1_000);
   const fixture = await runtimeFixture({ output });

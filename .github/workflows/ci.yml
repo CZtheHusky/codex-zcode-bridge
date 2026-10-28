@@ -29,4 +29,4 @@ jobs:
       - run: npm test
       - run: npm run validate:plugin
       - name: Check generated plugin bundles are committed
-        run: git diff --exit-code -- plugins/codex-zcode-bridge/dist/bridge.mjs plugins/codex-zcode-bridge/worker/worker-main.mjs
+        run: git diff --exit-code -- plugins/codex-zcode-bridge/dist/bridge.mjs plugins/codex-zcode-bridge/worker/worker-main.mjs plugins/codex-zcode-bridge/worker/schedule-runner.mjs

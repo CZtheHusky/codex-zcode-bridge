@@ -116,6 +116,7 @@ export function buildTaskResult(input: BuildTaskResultInput): TaskResult {
     tests: report.tests as TestReport[],
     issues: report.issues,
     needs_master_decision: report.needs_master_decision,
+    ...(report.acceptance_met === undefined ? {} : { acceptance_met: report.acceptance_met }),
   };
 }
 

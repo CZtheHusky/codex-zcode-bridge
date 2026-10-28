@@ -1,5 +1,10 @@
 # Codex → ZCode Bridge
 
+> Status: AUTHORITATIVE
+> Last updated: 2026-10-28
+> Last verified: 2026-10-28 — static review plus eight offline integration checks using real systemd 255, MCP, and Bridge workers; executor and App receiver were fixtures, with no model calls. Real GLM-5.3/max scheduling, continuation, current-App delivery and independent Codex acceptance also passed on this Linux host; a new turn from an idle chat remains unverified.
+> Verified against: 0e74ee1c64b179752a24317574916a98c77a5ef1 + scheduling working-tree changes.
+
 **Use ZCode as a coding worker inside Codex.**
 
 Delegate coding tasks from Codex to your local ZCode Agent. Codex assigns tasks, monitors progress, reviews the resulting changes, and decides whether to accept the work or send it back for another iteration.
@@ -50,6 +55,7 @@ Codex can delegate the task, monitor execution, inspect the resulting changes, v
 ## Features
 
 - Submit, follow, continue, and cancel ZCode tasks from Codex.
+- Schedule one goal to start at an absolute time on Linux with user-level systemd supervision. ZCode continues the same session quietly until it self-assesses ready for independent Codex review; Codex can accept or return concrete feedback. This scheduling path is experimental; its full real-ZCode E2E test has not run.
 - Run tasks across multiple projects concurrently; tasks sharing an execution directory are queued.
 - Read the live ZCode model catalog and reasoning levels, select a provider/model per task, and get/set/clear a Bridge default model.
 - At startup, report the project directory, execution directory, ZCode session, runtime-reported model and reasoning level, and execution mode.
@@ -63,7 +69,7 @@ Codex can delegate the task, monitor execution, inspect the resulting changes, v
 
 ## Install
 
-Requires Node.js 22.18+, Git, ZCode installed and signed in, and the Codex desktop app or CLI with marketplace support. Real ZCode E2E has only been completed on Windows; macOS and Linux have not been verified.
+Requires Node.js 22.18+, Git, ZCode installed and signed in, and the Codex desktop app or CLI with marketplace support. Real ZCode execution has been tested on recorded Windows and Linux environments; macOS remains unverified. Scheduling verification is scoped below.
 
 ### Install with Codex CLI
 
@@ -114,6 +120,20 @@ For installation or startup problems, call the `zcode_doctor` MCP tool for setup
 Use `zcode_model_catalog` with the current project path to read app-server model IDs and reasoning levels. Pass a selected `provider_id`/`model_id` in `zcode_task.model` for one task. Use `zcode_set_default_model` to configure the default for future tasks, `zcode_default_model` to read it, and `zcode_clear_default_model` to return to the ZCode session default. The catalog is cached for one day; provider config changes invalidate it. On a cache miss, the Bridge creates and closes a deferred session without sending a prompt. If a refresh fails, it re-reads provider config and retries once. A persistent failure reports an error with a `zcode_doctor` diagnostic step and never returns an expired catalog.
 
 If a `zcode_task` call times out or loses its response, query or retry with the same `task_id`; identical submissions replay the original receipt and changed content is rejected. For retryable `zcode_continue` calls, supply a stable `operation_id` so a lost response cannot increment the attempt twice.
+
+### Scheduled goals (experimental, Linux)
+
+Ask Codex to start one bounded goal at a specific date, time, and timezone, continue quietly until its acceptance criteria are met, and return to the current chat for independent review. The default Codex stdio host exposes `zcode_schedule`, `zcode_schedule_status`, `zcode_schedule_review`, and `zcode_schedule_cancel` in addition to the 13 core tools. Other hosts must explicitly compose the scheduler.
+
+`zcode_schedule` takes a complete `task`, an ISO 8601 `start_at` with `Z` or an explicit offset, and the original local Codex chat's `thread_id`. Codex must obtain that UUID from the current host context under the user's authorization. One `task_id` identifies one scheduled goal; an identical retry reuses it, and conflicting submissions fail. This is one delayed start followed by continued work, with no recurring creation of new tasks.
+
+The scheduler requires an available Linux user systemd manager, `systemd-run` with `--expand-environment=no` support (systemd 254 or newer), and a Codex App tools pipe. It records the supervisor unit and log path, waits until the start time, and resumes from persisted state after a runner crash. It does not enable linger or promise operation across logout, shutdown, or App closure. Missing scheduling support does not disable the ordinary task tools.
+
+Only scheduled prompts require the optional boolean `acceptance_met`. A completed attempt with `false` continues the same task and ZCode session quietly; `true` wakes the bound chat for independent inspection and acceptance checks. Codex then calls `zcode_schedule_review` with the current `attempt` and either `accepted: true`, or `accepted: false` plus concrete feedback to continue that session. A self-assessment, `completed`, or successful wakeup delivery alone never means acceptance. Normal progress and rejected reviews stay quiet for the human; notify them when Codex accepts the work or a critical issue requires attention.
+
+Missing or invalid self-assessment, decisions, pending permission/input requests, failures, quota exhaustion, or unverified cleanup wake Codex for judgment. Permissions are never auto-approved. A timeout can resume automatically only with a saved session and verified cleanup; quota exhaustion never triggers automatic continuation. Cancel through `zcode_schedule_cancel` so the persisted stop intent blocks future automatic work before task cleanup. If the MCP caller disappears, the runner resumes that cancellation; unverified cleanup stops cancellation retries and wakes Codex with `cancel_failed` for a decision.
+
+Wakeups use a persisted outbox with at-least-once delivery: a lost receipt can cause duplicates. Codex rechecks authoritative task state and the stable event ID before acting; stale attempts cannot be reviewed. The adapter uses an App-internal pipe observed on Linux App 26.1016.61520 / codex-app-tools 0.1.6, with no public cross-version guarantee. On 2026-10-28, eight offline integration checks passed using the source-built plugin, real systemd 255, MCP, and Bridge workers; the executor and App receiver were fixtures, with no model calls. Real GLM-5.3/max scheduling, same-session continuation, current-App delivery and independent Codex acceptance subsequently passed, including runner recovery, verified-cleanup timeout continuation and running cancellation. The idle-chat new-turn check remains unverified because a new user request resumed the chat before that callback arrived; historical idle wakeup evidence is separate. See the [live validation report](docs/reports/2026-10-28-scheduled-zcode-live-validation.md). See [ADR-010](docs/decisions/ADR-010-scheduled-zcode-and-codex-wakeup.md) and the [interface contract](docs/INTERFACES.md).
 
 ## Known issues
 

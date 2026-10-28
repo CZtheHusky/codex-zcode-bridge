@@ -304,6 +304,7 @@ test("the real validator rejects injected development-path references and keeps 
     ].join("\n");
     const bundlePath = path.join(pluginRoot, "dist", "bridge.mjs");
     writeFileSync(path.join(pluginRoot, "worker", "worker-main.mjs"), `${baseline}\n`, "utf8");
+    writeFileSync(path.join(pluginRoot, "worker", "schedule-runner.mjs"), `${baseline}\n`, "utf8");
     writeFileSync(path.join(pluginRoot, "worker", "vendor", "pkg", "browser-host.cjs"), `${baseline}\n`, "utf8");
 
     const variants: Array<[name: string, injection: string, expectLeakDiagnostic: boolean]> = [
