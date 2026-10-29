@@ -54,7 +54,7 @@ const PROTOCOL_MESSAGES = [
     jsonrpc: "2.0",
     id: 3,
     method: "tools/call",
-    params: { name: "zcode_status", arguments: { task_id: "ghost" } },
+    params: { name: "coding_agent_status", arguments: { task_id: "ghost" } },
   }),
 ].join("\n") + "\n";
 
@@ -83,6 +83,9 @@ test("compiled stdio entry speaks pure JSON-RPC on stdout and diagnostics on std
 
     const initialize = parsed.find((message) => message.id === 1);
     assert.ok(initialize?.result, "initialize must succeed");
+    assert.match(JSON.stringify(initialize.result), /coding-agent-bridge/);
+    assert.match(JSON.stringify(initialize.result), /Coding Agent Bridge/);
+    assert.match(JSON.stringify(initialize.result), /reasoning_levels/);
     const toolsList = parsed.find((message) => message.id === 2);
     const toolNames = (
       (toolsList?.result?.tools as Array<{ name: string }> | undefined) ?? []
@@ -93,23 +96,23 @@ test("compiled stdio entry speaks pure JSON-RPC on stdout and diagnostics on std
     // consumer that injects no scheduling sees only the 13 frozen core tools
     // (covered by mcp-server tests).
     assert.deepEqual(toolNames, [
-      "zcode_cancel",
-      "zcode_clear_default_model",
-      "zcode_continue",
-      "zcode_default_model",
-      "zcode_doctor",
-      "zcode_events",
-      "zcode_feedback",
-      "zcode_interaction_reply",
-      "zcode_model_catalog",
-      "zcode_result",
-      "zcode_schedule",
-      "zcode_schedule_cancel",
-      "zcode_schedule_review",
-      "zcode_schedule_status",
-      "zcode_set_default_model",
-      "zcode_status",
-      "zcode_task",
+      "coding_agent_cancel",
+      "coding_agent_clear_default_model",
+      "coding_agent_continue",
+      "coding_agent_default_model",
+      "coding_agent_doctor",
+      "coding_agent_events",
+      "coding_agent_feedback",
+      "coding_agent_interaction_reply",
+      "coding_agent_model_catalog",
+      "coding_agent_result",
+      "coding_agent_schedule",
+      "coding_agent_schedule_cancel",
+      "coding_agent_schedule_review",
+      "coding_agent_schedule_status",
+      "coding_agent_set_default_model",
+      "coding_agent_status",
+      "coding_agent_task",
     ]);
 
     const statusCall = parsed.find((message) => message.id === 3);
@@ -155,10 +158,13 @@ test("marketplace bundle starts from its plugin root without repo-local dependen
     const lines = run.stdout.split(/\r?\n/u).filter((line) => line.trim().length > 0);
     const messages = lines.map((line) => JSON.parse(line) as { id?: number; result?: Record<string, unknown> });
     assert.ok(messages.some((message) => message.id === 1 && message.result), "bundle must initialize over stdio");
+    const initialization = messages.find((message) => message.id === 1);
+    assert.match(JSON.stringify(initialization?.result), /Coding Agent Bridge/);
+    assert.match(JSON.stringify(initialization?.result), /coding_agent_schedule/);
     const toolsList = messages.find((message) => message.id === 2)?.result;
     const toolNames = ((toolsList?.["tools"] as Array<{ name: string }> | undefined) ?? []).map((tool) => tool.name).sort();
     assert.deepEqual(toolNames, [
-      "zcode_cancel", "zcode_clear_default_model", "zcode_continue", "zcode_default_model", "zcode_doctor", "zcode_events", "zcode_feedback", "zcode_interaction_reply", "zcode_model_catalog", "zcode_result", "zcode_schedule", "zcode_schedule_cancel", "zcode_schedule_review", "zcode_schedule_status", "zcode_set_default_model", "zcode_status", "zcode_task",
+      "coding_agent_cancel", "coding_agent_clear_default_model", "coding_agent_continue", "coding_agent_default_model", "coding_agent_doctor", "coding_agent_events", "coding_agent_feedback", "coding_agent_interaction_reply", "coding_agent_model_catalog", "coding_agent_result", "coding_agent_schedule", "coding_agent_schedule_cancel", "coding_agent_schedule_review", "coding_agent_schedule_status", "coding_agent_set_default_model", "coding_agent_status", "coding_agent_task",
     ]);
     assert.ok(existsSync(path.join(PLUGIN_ROOT, "worker", "worker-main.mjs")), "detached worker bundle must ship beside the MCP server");
     assert.match(run.stderr, /data root/);

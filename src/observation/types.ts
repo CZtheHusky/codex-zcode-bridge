@@ -42,7 +42,7 @@ export interface ObservationEvidence {
 }
 
 /**
- * The full observation projection shared by zcode_status, zcode_events, and
+ * The full observation projection shared by coding_agent_status, coding_agent_events, and
  * doctor diagnostics. Produced by the single pure judger in judge.ts so all
  three consumers agree on one verdict for one snapshot (A1-06).
  */

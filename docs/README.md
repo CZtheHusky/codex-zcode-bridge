@@ -141,3 +141,14 @@ English readers start at [README.md](../README.md). This index is bilingual; the
 ## 浏览器与传输修复审查分支
 
 [公开审查说明](reports/2026-10-15-browser-and-transport-fixes.md)汇总修改、来源、历史实测与当前分支验证；决策为[ADR-007](decisions/ADR-007-browser-host-rpc.md)和[ADR-008](decisions/ADR-008-session-frames-and-large-interactions.md)。私人任务状态索引、日志和快照不进入本分支。
+
+## Kimi 接入 Kimi integration
+
+| 文档 Document | 范围 Scope |
+|---|---|
+| [ADR-012](decisions/ADR-012-kimi-executor.md) | 原生执行器、兼容输入、权限和错误合同 / Native executor and compatibility contract |
+| [验证报告 Validation](reports/2026-10-28-kimi-validation.md) | 本机实测、回归与未验证边界 / Local live tests and remaining limits |
+
+- [ADR-013](decisions/ADR-013-coding-agent-bridge-discovery.md)：Coding Agent Bridge 展示名、coding_agent_* 工具与能力说明；安装及数据身份保留。
+
+- [ADR-014](decisions/ADR-014-kimi-reasoning-level.md)：Kimi reasoning_level 透传原生 thinking，按模型支持档位并保留省略默认。

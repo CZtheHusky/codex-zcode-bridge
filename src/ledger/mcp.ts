@@ -1,6 +1,6 @@
 // C1/C2/C3 MCP entry points for the project-task ledger. Registered ONLY when
 // the host explicitly provides a LedgerStore (opt-in); the 12 frozen core
-// tools are untouched and zcode_task never creates ledger data. The ledger
+// tools are untouched and coding_agent_task never creates ledger data. The ledger
 // tools are host-facing: review/complete/exempt require the controlled host
 // actor, so a worker report can never close a task.
 import { createHash } from "node:crypto";
@@ -44,7 +44,7 @@ const acSchema = z.object({ id: z.string().trim().min(1), text: z.string().trim(
 export function registerLedgerTools(server: McpServer, options: LedgerToolOptions): void {
   const link = new LedgerBridgeLink(options.store);
 
-  server.registerTool("ledger_project_create", {
+  server.registerTool("coding_agent_ledger_project_create", {
     title: "Create a project task ledger project",
     description: "Opt-in project ledger: create a project bound to an explicit absolute workspace. The ledger is independent of Bridge execution state.",
     inputSchema: z.strictObject({ project_id: z.string().trim().min(1).optional(), title: z.string().trim().min(1), workspace: z.string().trim().min(1) }),
@@ -54,7 +54,7 @@ export function registerLedgerTools(server: McpServer, options: LedgerToolOption
     } catch (error) { return mapLedgerError(error); }
   });
 
-  server.registerTool("ledger_summary", {
+  server.registerTool("coding_agent_ledger_summary", {
     title: "Read the project ledger summary",
     description: "Read-only: task list with statuses, review verdicts, and a coverage note. Task-count ratios are never overall engineering completion.",
     inputSchema: z.strictObject({ project_id: projectIdSchema }),
@@ -63,7 +63,7 @@ export function registerLedgerTools(server: McpServer, options: LedgerToolOption
     catch (error) { return mapLedgerError(error); }
   });
 
-  server.registerTool("ledger_task_create", {
+  server.registerTool("coding_agent_ledger_task_create", {
     title: "Create a ledger project task",
     description: "Create a long-lived ProjectTask with numbered acceptance criteria, constraints, dependencies (cycles refused), and an explicit workspace binding.",
     inputSchema: z.strictObject({
@@ -82,7 +82,7 @@ export function registerLedgerTools(server: McpServer, options: LedgerToolOption
     } catch (error) { return mapLedgerError(error); }
   });
 
-  server.registerTool("ledger_task_update", {
+  server.registerTool("coding_agent_ledger_task_update", {
     title: "Update a ledger project task definition",
     description: "Update goal/AC/dependencies. A definition change bumps the definition version and invalidates prior approvals.",
     inputSchema: z.strictObject({
@@ -101,7 +101,7 @@ export function registerLedgerTools(server: McpServer, options: LedgerToolOption
     } catch (error) { return mapLedgerError(error); }
   });
 
-  server.registerTool("ledger_task_get", {
+  server.registerTool("coding_agent_ledger_task_get", {
     title: "Read one ledger task",
     description: "Read-only task detail: definition, ACs, exemptions, runs, and latest review.",
     inputSchema: z.strictObject({ task_id: taskIdSchema }),
@@ -114,7 +114,7 @@ export function registerLedgerTools(server: McpServer, options: LedgerToolOption
     } catch (error) { return mapLedgerError(error); }
   });
 
-  server.registerTool("ledger_task_history", {
+  server.registerTool("coding_agent_ledger_task_history", {
     title: "Read ledger task history",
     description: "Read-only journal history for one task (change authority).",
     inputSchema: z.strictObject({ task_id: taskIdSchema }),
@@ -123,9 +123,9 @@ export function registerLedgerTools(server: McpServer, options: LedgerToolOption
     catch (error) { return mapLedgerError(error); }
   });
 
-  server.registerTool("ledger_run_start", {
+  server.registerTool("coding_agent_ledger_run_start", {
     title: "Start a ledger run and dispatch to the Bridge",
-    description: "Persists the run intent with a deterministic executor task id BEFORE dispatching, then calls zcode_task internally. A lost receipt recovers the same execution; retries reuse the same operation_id. executor 'manual' records external work with evidence instead of dispatching.",
+    description: "Persists the run intent with a deterministic executor task id BEFORE dispatching, then calls coding_agent_task internally. A lost receipt recovers the same execution; retries reuse the same operation_id. executor 'manual' records external work with evidence instead of dispatching.",
     inputSchema: z.strictObject({
       task_id: taskIdSchema,
       operation_id: z.string().trim().min(1).max(100),
@@ -173,7 +173,7 @@ export function registerLedgerTools(server: McpServer, options: LedgerToolOption
     } catch (error) { return mapLedgerError(error); }
   });
 
-  server.registerTool("ledger_run_link", {
+  server.registerTool("coding_agent_ledger_run_link", {
     title: "Project Bridge evidence onto a ledger run",
     description: "Reads the Bridge task's events and result, projects accepted/started/model-confirmation/finished facts onto the run (idempotent). Never derives the business status: DONE requires the review gate.",
     inputSchema: z.strictObject({ run_id: z.string().trim().min(1) }),
@@ -182,7 +182,7 @@ export function registerLedgerTools(server: McpServer, options: LedgerToolOption
     catch (error) { return mapLedgerError(error); }
   });
 
-  server.registerTool("ledger_review", {
+  server.registerTool("coding_agent_ledger_review", {
     title: "Record a per-AC review",
     description: "Controlled host entry: records per-acceptance-criterion verdicts with evidence and binds deliverable fingerprints to the current definition version. Rejection returns the task to ready. Worker self-reports cannot call this.",
     inputSchema: z.strictObject({
@@ -199,7 +199,7 @@ export function registerLedgerTools(server: McpServer, options: LedgerToolOption
     } catch (error) { return mapLedgerError(error); }
   });
 
-  server.registerTool("ledger_complete", {
+  server.registerTool("coding_agent_ledger_complete", {
     title: "Complete a project task (DONE gate)",
     description: "Controlled host entry: DONE requires a current approved review bound to the current definition version, every AC passed or explicitly exempted, and a delivery receipt for the bound workspace. Refuses otherwise.",
     inputSchema: z.strictObject({
@@ -213,7 +213,7 @@ export function registerLedgerTools(server: McpServer, options: LedgerToolOption
     } catch (error) { return mapLedgerError(error); }
   });
 
-  server.registerTool("ledger_reopen", {
+  server.registerTool("coding_agent_ledger_reopen", {
     title: "Reopen a done project task",
     description: "Explicit reopen event with a reason; prior DONE/review history is preserved, never overwritten.",
     inputSchema: z.strictObject({ task_id: taskIdSchema, reason: z.string().trim().min(1) }),

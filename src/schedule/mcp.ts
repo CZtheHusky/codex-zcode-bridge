@@ -1,7 +1,7 @@
 // ADR-010 MCP registration for the four scheduling tools. Registered ONLY
 // when the host explicitly injects a ScheduleController (opt-in, like the
 // project ledger); the frozen core tools behave exactly as before without it.
-// These tools are host-facing: zcode_schedule_review records the independent
+// These tools are host-facing: coding_agent_schedule_review records the independent
 // Codex verdict; a worker self-assessment can never accept a goal.
 import type { McpServer } from "@modelcontextprotocol/server";
 import { TaskManagerError } from "../manager/errors.js";
@@ -40,7 +40,7 @@ function mapScheduleError(error: unknown) {
 }
 
 const SCHEDULE_QUIET_NOTE =
-  "Scheduled goals run quietly: normal progress and a false self-assessment continue the SAME ZCode session without model wakeups; only review requests, blocked interactions, failures, quota exhaustion, unverified cleanup, or a missing self-assessment wake the original chat.";
+  "Scheduled goals run quietly: normal progress and a false self-assessment continue the SAME executor session without model wakeups; only review requests, blocked interactions, failures, quota exhaustion, unverified cleanup, or a missing self-assessment wake the original chat.";
 
 export function registerScheduleTools(server: McpServer, options: ScheduleToolOptions): void {
   const controller = options.controller;
@@ -49,9 +49,9 @@ export function registerScheduleTools(server: McpServer, options: ScheduleToolOp
     if (pipe) controller.noteAppPipePath(pipe);
   };
 
-  server.registerTool("zcode_schedule", {
-    title: "Schedule one ZCode goal for autonomous execution",
-    description: `Submit one bounded goal to start at an absolute time (ISO datetime WITH timezone) on this Linux host, supervised by the user's systemd manager. task_id is the schedule key: an identical resubmission replays the schedule receipt; a different request with the same id returns SCHEDULE_CONFLICT. thread_id MUST be the UUID of the current original Codex chat, captured from host context (for example CODEX_THREAD_ID when the host provides it) — never guessed from unrelated environment. The scheduled prompt additionally requires the agent's boolean acceptance_met self-assessment: false continues the same session quietly, true wakes thread_id for independent review, and a missing/invalid assessment wakes it with uncertainty. Requires user-level systemd; a missing supervisor or App pipe fails visibly for scheduling only while the ordinary tools keep working. ${SCHEDULE_QUIET_NOTE}`,
+  server.registerTool("coding_agent_schedule", {
+    title: "Schedule a ZCode or Kimi goal and wake the original Codex chat",
+    description: `task uses the same executor/model options as coding_agent_task: omit executor for ZCode, or set task.executor="kimi" with task.kimi.model and optional task.kimi.reasoning_level (model-supported effort, currently low/high/max for K3/K3.1 Pro and standard models); its full scheduled wakeup chain remains unverified. Submit one bounded goal to start at an absolute time (ISO datetime WITH timezone) on this Linux host, supervised by the user's systemd manager. task_id is the schedule key: an identical resubmission replays the schedule receipt; a different request with the same id returns SCHEDULE_CONFLICT. thread_id MUST be the UUID of the current original Codex chat, captured from host context (for example CODEX_THREAD_ID when the host provides it) — never guessed from unrelated environment. The scheduled prompt additionally requires the agent's boolean acceptance_met self-assessment: false continues the same session quietly, true wakes thread_id for independent review, and a missing/invalid assessment wakes it with uncertainty. Requires user-level systemd; a missing supervisor or App pipe fails visibly for scheduling only while the ordinary tools keep working. ${SCHEDULE_QUIET_NOTE}`,
     inputSchema: zcodeScheduleInputSchema,
     outputSchema: scheduleReceiptSchema,
   }, async (args: { task: Parameters<ScheduleController["submit"]>[0]["task"]; start_at: string; thread_id: string }) => {
@@ -62,7 +62,7 @@ export function registerScheduleTools(server: McpServer, options: ScheduleToolOp
     } catch (error) { return mapScheduleError(error); }
   });
 
-  server.registerTool("zcode_schedule_status", {
+  server.registerTool("coding_agent_schedule_status", {
     title: "Read scheduled goal status",
     description: `Read one schedule's goal state (scheduled/dispatched/awaiting_review/accepted/cancelled/failed), the live Bridge execution state for its task, any attention reason, the pending review window, and wakeup delivery states. Execution status and goal review are reported separately; a sent wakeup is never task acceptance. ${SCHEDULE_QUIET_NOTE}`,
     inputSchema: zcodeScheduleStatusInputSchema,
@@ -74,9 +74,9 @@ export function registerScheduleTools(server: McpServer, options: ScheduleToolOp
     } catch (error) { return mapScheduleError(error); }
   });
 
-  server.registerTool("zcode_schedule_review", {
+  server.registerTool("coding_agent_schedule_review", {
     title: "Record the independent review verdict for a scheduled goal",
-    description: `After zcode_schedule_status shows awaiting_review, verify the work independently, then record the verdict for exactly that attempt. accepted=true ends the goal. accepted=false REQUIRES concrete feedback and resumes the SAME ZCode session through a stable continuation; address every feedback point. Stale attempts, cancelled goals, and conflicting verdicts are rejected; retrying the identical verdict replays the recorded outcome.`,
+    description: `After coding_agent_schedule_status shows awaiting_review, verify the work independently, then record the verdict for exactly that attempt. accepted=true ends the goal. accepted=false REQUIRES concrete feedback and resumes the SAME executor session through a stable continuation; address every feedback point. Stale attempts, cancelled goals, and conflicting verdicts are rejected; retrying the identical verdict replays the recorded outcome.`,
     inputSchema: zcodeScheduleReviewInputSchema,
     outputSchema: scheduleReviewResultSchema,
   }, async (args: { task_id: string; attempt: number; accepted: boolean; feedback?: string }) => {
@@ -86,7 +86,7 @@ export function registerScheduleTools(server: McpServer, options: ScheduleToolOp
     } catch (error) { return mapScheduleError(error); }
   });
 
-  server.registerTool("zcode_schedule_cancel", {
+  server.registerTool("coding_agent_schedule_cancel", {
     title: "Cancel a scheduled goal",
     description: "Cancel one scheduled goal: the stop intent is persisted FIRST (blocking any further automatic continuation), then any existing task is cancelled through the verified process-tree path. Idempotent; cancelling an accepted goal is rejected. Obsolete undelivered wakeup events are superseded.",
     inputSchema: zcodeScheduleCancelInputSchema,

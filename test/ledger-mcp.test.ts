@@ -54,18 +54,18 @@ test("opt-in ledger tools register alongside the frozen twelve; summary and crea
   await withLedgerServer(async (client) => {
     const { tools } = await client.listTools();
     const names = tools.map((tool) => tool.name);
-    for (const core of ["zcode_task", "zcode_status", "zcode_result", "zcode_cancel", "zcode_doctor"]) {
+    for (const core of ["coding_agent_task", "coding_agent_status", "coding_agent_result", "coding_agent_cancel", "coding_agent_doctor"]) {
       assert.ok(names.includes(core), `core tool ${core} must remain`);
     }
-    for (const ledger of ["ledger_project_create", "ledger_summary", "ledger_task_create", "ledger_task_update", "ledger_task_get", "ledger_task_history", "ledger_run_start", "ledger_run_link", "ledger_review", "ledger_complete", "ledger_reopen"]) {
+    for (const ledger of ["coding_agent_ledger_project_create", "coding_agent_ledger_summary", "coding_agent_ledger_task_create", "coding_agent_ledger_task_update", "coding_agent_ledger_task_get", "coding_agent_ledger_task_history", "coding_agent_ledger_run_start", "coding_agent_ledger_run_link", "coding_agent_ledger_review", "coding_agent_ledger_complete", "coding_agent_ledger_reopen"]) {
       assert.ok(names.includes(ledger), `ledger tool ${ledger} must be registered`);
     }
     const created = (await client.callTool({
-      name: "ledger_project_create",
+      name: "coding_agent_ledger_project_create",
       arguments: { title: "MCP 项目", workspace: tmpdir() },
     })) as CallToolResult;
     assert.equal(created.isError ?? false, false);
-    const summary = (await client.callTool({ name: "ledger_summary", arguments: {} })) as CallToolResult;
+    const summary = (await client.callTool({ name: "coding_agent_ledger_summary", arguments: {} })) as CallToolResult;
     assert.match(JSON.stringify(summary.structuredContent), /MCP 项目/);
     assert.match(JSON.stringify(summary.structuredContent), /不是整体工程完成度/);
   });
@@ -75,14 +75,14 @@ test("the DONE gate refuses through MCP without a review, with the ledger error 
   await withLedgerServer(async (client, store) => {
     const workspace = mkdtempSync(path.join(tmpdir(), "zcode-bridge-ledger-mcp-ws-"));
     try {
-      await client.callTool({ name: "ledger_project_create", arguments: { title: "P", workspace } });
+      await client.callTool({ name: "coding_agent_ledger_project_create", arguments: { title: "P", workspace } });
       const task = (await client.callTool({
-        name: "ledger_task_create",
+        name: "coding_agent_ledger_task_create",
         arguments: { goal: "g", acceptance_criteria: [{ id: "AC1", text: "x" }], workspace },
       })) as CallToolResult;
       const taskId = (task.structuredContent as { task: { task_id: string } }).task.task_id;
       const complete = (await client.callTool({
-        name: "ledger_complete",
+        name: "coding_agent_ledger_complete",
         arguments: { task_id: taskId, delivery: { accepted: true, workspace, evidence: "received" } },
       })) as CallToolResult;
       assert.equal(complete.isError, true);

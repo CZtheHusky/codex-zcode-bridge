@@ -60,4 +60,4 @@ if (mode === "yolo") {
   parts.push("WARNING: yolo allows ordinary tool operations without approval and uses the current OS account's permissions. Set ZCODE_BRIDGE_MODE to build in runtime-config.json to use ZCode's approval rules.");
 }
 
-stdout.write(`Codex ZCode Bridge setup check: ${parts.join("; ")}\n`);
+stdout.write(`Coding Agent Bridge setup check: ${parts.join("; ")}\n`);

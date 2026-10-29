@@ -32,7 +32,7 @@ export function createWorkerEnv(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     // Env-only browser configuration (ADR-007): non-secret strings the worker's
     // adapter reads from its own environment when no persisted setting exists.
     "ZCODE_BRIDGE_BROWSER_USE", "ZCODE_BRIDGE_BROWSER_EXECUTABLE",
-    "ZCODE_HOME",
+    "ZCODE_HOME", "KIMI_BRIDGE_EXECUTABLE", "KIMI_CODE_HOME",
     "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE", "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE",
     "ZCODE_DATA_BASE_DIR", "ZCODE_WINDOWS_APP_INSTALL_DIR",
   ]);

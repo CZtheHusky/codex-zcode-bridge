@@ -53,6 +53,8 @@ export type AdapterErrorCode =
   | "cancelled"
   | "invalid_json"
   | "invalid_agent_report"
+  | "kimi_nonzero_exit"
+  | "kimi_usage_exhausted"
   | "zcode_nonzero_exit"
   | "unknown_turn_terminal";
 
@@ -550,7 +552,7 @@ export class ZCodeAdapter implements CodingAgentAdapter {
 
     const terminationVerified = entry.terminationStarted && entry.terminationError === null;
     // A cancellation whose process-tree termination could not be verified does
-    // not eclipse a natural clean completion (docs/INTERFACES.md zcode_cancel:
+    // not eclipse a natural clean completion (docs/INTERFACES.md coding_agent_cancel:
     // the task stays nonterminal; the natural result still becomes evidence).
     if (entry.cancelRequested && (terminationVerified || snapshot.code !== 0)) {
       return {

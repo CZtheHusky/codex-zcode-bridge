@@ -59,7 +59,7 @@ test("MCP identity and instructions are supplied by the host; experiments requir
       await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
       assert.equal(client.getServerVersion()?.name, "dsh-test-bridge");
       assert.equal(client.getInstructions(), "Host-supplied instructions");
-      assert.equal((await client.listTools()).tools.some((tool) => tool.name === "zcode_progress_probe"), experiments);
+      assert.equal((await client.listTools()).tools.some((tool) => tool.name === "coding_agent_progress_probe"), experiments);
     } finally { await Promise.all([client.close(), server.close()]); }
   }
 });

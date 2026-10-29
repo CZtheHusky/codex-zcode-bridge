@@ -1,7 +1,7 @@
 {
   "name": "codex-zcode-bridge",
   "version": "1.2.7",
-  "description": "让 Codex 通过本地 Bridge 委派、跟进并审查 ZCode 开发任务。",
+  "description": "把开发任务交给本机 ZCode 或 Kimi，选择模型、后台执行、跟进续作，并独立验收；支持受环境限制的预约与原聊天唤醒。",
   "license": "Apache-2.0",
   "repository": "https://github.com/Sandyzzx/codex-zcode-bridge",
   "homepage": "https://github.com/Sandyzzx/codex-zcode-bridge",
@@ -9,16 +9,19 @@
     "codex",
     "zcode",
     "mcp",
-    "developer-tools"
+    "developer-tools",
+    "kimi",
+    "coding-agent",
+    "scheduling"
   ],
   "author": {
     "name": "Sandy"
   },
   "skills": "./skills/",
   "interface": {
-    "displayName": "Zcode Bridge",
-    "shortDescription": "把开发任务交给本机 ZCode 执行。",
-    "longDescription": "通过本地 MCP 将开发任务交给 ZCode，在 Codex 查看进度、审查改动并决定是否接收。",
+    "displayName": "Coding Agent Bridge",
+    "shortDescription": "委派、跟进和验收本机 ZCode / Kimi 编码任务。",
+    "longDescription": "把开发任务交给本机 ZCode 或 Kimi，选择模型、后台执行、跟进续作，并独立验收；支持受环境限制的预约与原聊天唤醒。",
     "developerName": "Sandy",
     "category": "Developer tools",
     "capabilities": [
@@ -26,9 +29,9 @@
       "Task delegation"
     ],
     "defaultPrompt": [
-      "把这个开发任务交给 ZCode，并跟进到完成。",
-      "用指定模型让 ZCode 修复这个问题。",
-      "检查 ZCode 的任务进度和最终改动。"
+      "让 Kimi 在后台实现这个需求，并跟进到独立验收。",
+      "查询 ZCode 模型和推理档位，再用指定配置执行任务。",
+      "预约执行这个目标，达标后唤醒当前聊天验收。"
     ],
     "logo": "./assets/logo.png",
     "composerIcon": "./assets/icon.png"

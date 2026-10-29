@@ -1339,7 +1339,7 @@ function parseProgressEvent(line: string): TaskProgressEvent | null {
 
 export function isTerminalStatus(status: TaskStatus): boolean {
   // waiting_for_master ends the current attempt and has a persisted result;
-  // a later master decision starts a new attempt through zcode_continue.
+  // a later master decision starts a new attempt through coding_agent_continue.
   return (
     status === "completed" ||
     status === "failed" ||

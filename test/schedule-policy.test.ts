@@ -60,8 +60,10 @@ test("waiting_for_master escalates a decision request", () => {
 });
 
 test("usage exhaustion always escalates and never retries", () => {
-  const decision = evaluateTerminalResult("task_1", result({ status: "failed", error_code: "zcode_usage_exhausted", session_id: "sess_x" }));
-  assert.deepEqual(decision, { action: "escalate", reason: "usage_exhausted" });
+  for (const error_code of ["zcode_usage_exhausted", "kimi_usage_exhausted"]) {
+    const decision = evaluateTerminalResult("task_1", result({ status: "failed", error_code, session_id: "sess_x" }));
+    assert.deepEqual(decision, { action: "escalate", reason: "usage_exhausted" });
+  }
 });
 
 test("timeout continues only with an existing session", () => {
@@ -107,8 +109,8 @@ test("notification messages reference tools and ids only, never result content",
   assert.match(message, /attempt 2/);
   assert.match(message, /reason=task_failed/);
   assert.match(message, /error_code=zcode_nonzero_exit/);
-  assert.match(message, /zcode_schedule_review/);
-  assert.match(message, /zcode_interaction_reply/);
+  assert.match(message, /coding_agent_schedule_review/);
+  assert.match(message, /coding_agent_interaction_reply/);
   assert.match(message, /never auto-approves/);
   assert.doesNotMatch(message, /zcode_output|files_changed/);
   const withRequest = buildNotificationMessage({ eventId: buildEventId("task_1", 1, "pending_interaction", "1:perm-9"), taskId: "task_1", attempt: 1, reason: "pending_interaction", requestId: "1:perm-9" });

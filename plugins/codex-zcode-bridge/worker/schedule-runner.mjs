@@ -1515,6 +1515,8 @@ function createWorkerEnv(source) {
     "ZCODE_BRIDGE_BROWSER_USE",
     "ZCODE_BRIDGE_BROWSER_EXECUTABLE",
     "ZCODE_HOME",
+    "KIMI_BRIDGE_EXECUTABLE",
+    "KIMI_CODE_HOME",
     "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE",
     "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE",
     "ZCODE_DATA_BASE_DIR",
@@ -4017,7 +4019,7 @@ var BridgeTaskManager = class _BridgeTaskManager {
       if (!["completed", "failed", "waiting_for_master"].includes(status.status)) {
         throw new TaskManagerError(
           "TASK_STATE",
-          `zcode_continue is not allowed from status ${status.status}`
+          `coding_agent_continue is not allowed from status ${status.status}`
         );
       }
       if (status.cleanup_unverified) throw new TaskManagerError("TASK_STATE", "Cannot continue until unverified ZCode process cleanup is resolved");
@@ -4157,7 +4159,7 @@ var BridgeTaskManager = class _BridgeTaskManager {
       if (isTerminalStatus(status.status)) {
         throw new TaskManagerError(
           "TASK_STATE",
-          `zcode_cancel is not allowed from status ${status.status}`
+          `coding_agent_cancel is not allowed from status ${status.status}`
         );
       }
       const task = this.#store.readTask(taskId2);
@@ -4841,7 +4843,7 @@ function evaluateTerminalResult(taskId2, result) {
     case "waiting_for_master":
       return { action: "escalate", reason: "needs_decision" };
     case "failed":
-      if (result.error_code === "zcode_usage_exhausted") return { action: "escalate", reason: "usage_exhausted" };
+      if (result.error_code === "zcode_usage_exhausted" || result.error_code === "kimi_usage_exhausted") return { action: "escalate", reason: "usage_exhausted" };
       if (result.error_code === "timeout" && result.session_id !== null) {
         return {
           action: "continue",
@@ -4871,11 +4873,11 @@ var REASON_HEADLINES = {
 function buildNotificationMessage(input) {
   const lines = [
     `Event ID: ${JSON.stringify(input.eventId)}`,
-    `[ZCode Bridge schedule] task "${input.taskId}" attempt ${String(input.attempt)}: ${REASON_HEADLINES[input.reason]}.`,
+    `[Coding Agent Bridge schedule] task "${input.taskId}" attempt ${String(input.attempt)}: ${REASON_HEADLINES[input.reason]}.`,
     "This is a scheduler wakeup, not task acceptance; execution status and goal review are separate.",
-    `- Inspect the authoritative state yourself with zcode_schedule_status (task_id "${input.taskId}"), then zcode_status / zcode_result / zcode_events on the task.`,
-    "- If the agent self-assessed acceptance_met=true: independently verify the work, then call zcode_schedule_review with accepted=true, or accepted=false plus concrete feedback to resume the SAME ZCode session.",
-    "- For a pending permission or input request: decide with the user and reply via zcode_interaction_reply using the exact request_id; the scheduler never auto-approves.",
+    `- Inspect the authoritative state yourself with coding_agent_schedule_status (task_id "${input.taskId}"), then coding_agent_status / coding_agent_result / coding_agent_events on the task.`,
+    "- If the agent self-assessed acceptance_met=true: independently verify the work, then call coding_agent_schedule_review with accepted=true, or accepted=false plus concrete feedback to resume the SAME executor session.",
+    "- For a pending permission or input request: decide with the user and reply via coding_agent_interaction_reply using the exact request_id; the scheduler never auto-approves.",
     "- If provider quota is exhausted or cleanup is unverified: stop, inform the user, and do not auto-retry or continue.",
     "- Notify the human only when you accept the outcome or a human decision is required."
   ];
@@ -5195,7 +5197,7 @@ var ScheduleController = class {
     });
   }
   /** Terminal attempt with acceptance_met=true: wake the original thread for
-   * independent review; the goal now waits for zcode_schedule_review. */
+   * independent review; the goal now waits for coding_agent_schedule_review. */
   async requestReview(taskId2, attempt) {
     await this.#locked(taskId2, async (state, spec) => {
       if (state.cancel_requested || state.status === "cancelled" || state.status === "accepted" || state.status === "failed") return;

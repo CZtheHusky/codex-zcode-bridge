@@ -207,7 +207,7 @@ test("acceptance_met=true requests independent review and wakes the thread once"
     assert.equal(state.status, "awaiting_review");
     assert.equal(state.attempt_under_review, 1);
     assert.equal(harness.sentMessages.length, 1);
-    assert.match(harness.sentMessages[0]!, /zcode_schedule_review/);
+    assert.match(harness.sentMessages[0]!, /coding_agent_schedule_review/);
     // Re-observing the same terminal result does not wake again.
     await harness.run(6, () => now);
     assert.equal(harness.sentMessages.length, 1);

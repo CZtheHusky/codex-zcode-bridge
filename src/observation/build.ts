@@ -1,5 +1,5 @@
 // Shared observation assembly: reads bounded persisted evidence from the
-// TaskStore and feeds the pure judger. zcode_status, zcode_events, and doctor
+// TaskStore and feeds the pure judger. coding_agent_status, coding_agent_events, and doctor
 // all go through buildTaskObservation so one snapshot always yields one
 // verdict (A1-06). No OS queries happen here — getStatus stays fast and
 // recovery probes reach this path only through persisted verdict records.

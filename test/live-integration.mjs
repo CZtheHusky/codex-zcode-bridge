@@ -155,12 +155,12 @@ try {
   const { tools } = await client.listTools();
   const names = tools.map((tool) => tool.name).sort();
   assert.deepEqual(names, [
-    "zcode_cancel",
-    "zcode_continue",
-    "zcode_events",
-    "zcode_result",
-    "zcode_status",
-    "zcode_task",
+    "coding_agent_cancel",
+    "coding_agent_continue",
+    "coding_agent_events",
+    "coding_agent_result",
+    "coding_agent_status",
+    "coding_agent_task",
   ]);
 
 const providerId = process.env.ZCODE_BRIDGE_E2E_MODEL_PROVIDER_ID?.trim();
@@ -172,7 +172,7 @@ const model = { provider_id: providerId, model_id: modelId };
   const testCommand = `${python.command} ${[...python.prefix, "-B", "-m", "unittest", "-v", "test_calculator.py"].join(" ")}`;
   const receipt = structured(
     await client.callTool({
-      name: "zcode_task",
+      name: "coding_agent_task",
       arguments: {
         task_id: taskId,
         workspace,
@@ -194,15 +194,15 @@ const model = { provider_id: providerId, model_id: modelId };
         context: "A test_calculator.py verifier already exists in this temporary project. Implement only the requested module.",
       },
     }),
-    "zcode_task",
+    "coding_agent_task",
   );
   assert.equal(receipt.task_id, taskId);
   submitted = true;
   console.log("task accepted:", JSON.stringify({ task_id: receipt.task_id, status: receipt.status, model }));
 
   const initialEvents = structured(
-    await client.callTool({ name: "zcode_events", arguments: { task_id: taskId, after_seq: 0, wait_ms: 0 } }),
-    "zcode_events after submission",
+    await client.callTool({ name: "coding_agent_events", arguments: { task_id: taskId, after_seq: 0, wait_ms: 0 } }),
+    "coding_agent_events after submission",
   );
   const workspaceEvent = initialEvents.events.find((event) => event.type === "workspace_ready");
   assert.ok(workspaceEvent, "Bridge must return the isolated workspace event");
@@ -220,8 +220,8 @@ const model = { provider_id: providerId, model_id: modelId };
   let statusRecord;
   while (Date.now() < deadline) {
     statusRecord = structured(
-      await client.callTool({ name: "zcode_status", arguments: { task_id: taskId } }),
-      "zcode_status",
+      await client.callTool({ name: "coding_agent_status", arguments: { task_id: taskId } }),
+      "coding_agent_status",
     );
     if (terminalStates.has(statusRecord.status)) {
       terminalConfirmed = true;
@@ -232,12 +232,12 @@ const model = { provider_id: providerId, model_id: modelId };
   if (!terminalConfirmed) throw new Error(`timed out waiting for task ${taskId}`);
 
   resultRecord = structured(
-    await client.callTool({ name: "zcode_result", arguments: { task_id: taskId } }),
-    "zcode_result",
+    await client.callTool({ name: "coding_agent_result", arguments: { task_id: taskId } }),
+    "coding_agent_result",
   );
   const finalEvents = structured(
-    await client.callTool({ name: "zcode_events", arguments: { task_id: taskId, after_seq: 0, limit: 200, wait_ms: 0 } }),
-    "zcode_events after completion",
+    await client.callTool({ name: "coding_agent_events", arguments: { task_id: taskId, after_seq: 0, limit: 200, wait_ms: 0 } }),
+    "coding_agent_events after completion",
   );
   console.log("bridge result:", JSON.stringify({
     status: resultRecord.status,
@@ -308,15 +308,15 @@ const model = { provider_id: providerId, model_id: modelId };
 } finally {
   if (submitted && !terminalConfirmed) {
     try {
-      const cancel = await client.callTool({ name: "zcode_cancel", arguments: { task_id: taskId } });
-      const canceledStatus = structured(cancel, "zcode_cancel");
+      const cancel = await client.callTool({ name: "coding_agent_cancel", arguments: { task_id: taskId } });
+      const canceledStatus = structured(cancel, "coding_agent_cancel");
       terminalConfirmed = terminalStates.has(canceledStatus.status);
       if (!terminalConfirmed) {
         const deadline = Date.now() + 10_000;
         while (Date.now() < deadline) {
           const status = structured(
-            await client.callTool({ name: "zcode_status", arguments: { task_id: taskId } }),
-            "zcode_status after cancellation",
+            await client.callTool({ name: "coding_agent_status", arguments: { task_id: taskId } }),
+            "coding_agent_status after cancellation",
           );
           if (terminalStates.has(status.status)) {
             terminalConfirmed = true;

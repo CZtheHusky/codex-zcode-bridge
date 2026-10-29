@@ -281,7 +281,7 @@ test("the real validator rejects injected development-path references and keeps 
     copyFileSync(path.join(scriptsDir, "lib", "repo-root-pattern.mjs"), path.join(root, "scripts", "lib", "repo-root-pattern.mjs"));
 
     const manifest = { name: "codex-zcode-bridge", version: "1.2.5" };
-    const mcp = { mcpServers: { zcode_bridge: { command: "node", args: ["./dist/bridge.mjs"], env: { ZCODE_BRIDGE_PLUGIN_MODE: "1" } } } };
+    const mcp = { mcpServers: { coding_agent_bridge: { command: "node", args: ["./dist/bridge.mjs"], env: { ZCODE_BRIDGE_PLUGIN_MODE: "1" } } } };
     writeFileSync(path.join(root, "package.json"), JSON.stringify(manifest));
     writeFileSync(path.join(pluginRoot, "plugin.json"), JSON.stringify(manifest));
     writeFileSync(path.join(pluginRoot, ".codex-plugin", "plugin.json"), JSON.stringify(manifest));

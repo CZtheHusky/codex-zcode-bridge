@@ -39,3 +39,7 @@ ADR-001 到 ADR-003 只搬运权威文档里已经写明的结论。ADR-004 原�
 ## 命名
 
 新决策使用 `ADR-NNN-<slug>.md`，正文至少包含 Status、Date、Context、Decision、Rationale、Consequences。
+
+- [ADR-013](ADR-013-coding-agent-bridge-discovery.md)：Coding Agent Bridge 展示名、coding_agent_* 工具与能力说明；安装及数据身份保留。
+
+- [ADR-014](ADR-014-kimi-reasoning-level.md)：Kimi reasoning_level 透传原生 thinking，按模型支持档位并保留省略默认。

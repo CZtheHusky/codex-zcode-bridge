@@ -28,3 +28,5 @@ export { sanitizeDiagnostics, DiagnosticCounters, DIAGNOSTIC_FIELD_WHITELIST } f
 export { renderFeedback, formatTokens, formatDuration, escapeCell, type FeedbackInput } from "./feedback/template.js";
 // B4 usage normalization.
 export { normalizeUsage, addNonOverlappingUsage, phaseDuration } from "./usage/normalize.js";
+
+export { KimiAdapter } from "./adapters/kimi-adapter.js";

@@ -143,23 +143,35 @@ function fullTaskArguments(): Record<string, unknown> {
   };
 }
 
-test("the frozen tools and additive progress, feedback, interaction, and doctor tools are registered", async () => {
+test("Coding Agent Bridge tools explain executor choice and model configuration through MCP discovery", async () => {
   await withServer(async (client) => {
     const { tools } = await client.listTools();
     assert.deepEqual(
       tools.map((tool) => tool.name).sort(),
-      ["zcode_cancel", "zcode_clear_default_model", "zcode_continue", "zcode_default_model", "zcode_doctor", "zcode_events", "zcode_feedback", "zcode_interaction_reply", "zcode_model_catalog", "zcode_result", "zcode_set_default_model", "zcode_status", "zcode_task"],
+      ["coding_agent_cancel", "coding_agent_clear_default_model", "coding_agent_continue", "coding_agent_default_model", "coding_agent_doctor", "coding_agent_events", "coding_agent_feedback", "coding_agent_interaction_reply", "coding_agent_model_catalog", "coding_agent_result", "coding_agent_set_default_model", "coding_agent_status", "coding_agent_task"],
     );
-    const task = tools.find((tool) => tool.name === "zcode_task")!;
+    const task = tools.find((tool) => tool.name === "coding_agent_task")!;
     assert.match(task.description!, /calling host/);
     assert.match(task.description!, /NOT/);
+    assert.match(task.description!, /executor="kimi"/);
+    assert.match(task.description!, /model: \{ provider_id, model_id, reasoning_level\? \}/);
+    assert.match(task.description!, /Kimi supports kimi.model and optional kimi.reasoning_level/);
+    assert.match(JSON.stringify(task.inputSchema), /reasoning_levels\[\]\.value/);
+    assert.match(JSON.stringify(task.inputSchema), /Kimi configured local model alias/);
+    const instructions = client.getInstructions()!;
+    assert.match(instructions, /Coding Agent Bridge/);
+    assert.match(instructions, /ZCode \(default\) or Kimi/);
+    assert.match(instructions, /coding_agent_model_catalog/);
+    assert.match(instructions, /Kimi reasoning_level is forwarded as native thinking/);
+    assert.doesNotMatch(instructions, /Use coding_agent_schedule/, "generic hosts without scheduling must not advertise unavailable schedule tools");
+    assert.ok(tools.every(tool => tool.name.startsWith("coding_agent_")));
     for (const tool of tools) {
       assert.ok(tool.description && tool.description.length > 20, `${tool.name} needs a description`);
     }
   });
 });
 
-test("zcode_doctor returns read-only setup diagnostics", async () => {
+test("coding_agent_doctor returns read-only setup diagnostics", async () => {
   const report = {
     checked_at: CREATED_AT,
     execution_mode: "build",
@@ -169,23 +181,23 @@ test("zcode_doctor returns read-only setup diagnostics", async () => {
     ],
   };
   await withServer(async (client) => {
-    const result = (await client.callTool({ name: "zcode_doctor", arguments: {} })) as CallToolResult;
+    const result = (await client.callTool({ name: "coding_agent_doctor", arguments: {} })) as CallToolResult;
     assert.equal(result.isError, undefined);
     assert.deepEqual(result.structuredContent, report);
   }, async () => report);
 });
 
-test("zcode_interaction_reply forwards a bounded explicit decision", async () => {
+test("coding_agent_interaction_reply forwards a bounded explicit decision", async () => {
   await withServer(async (client, manager) => {
     const args = { task_id: "task_1", request_id: "permission-1", decision: "deny", reason: "Not authorized" };
-    const result = (await client.callTool({ name: "zcode_interaction_reply", arguments: args })) as CallToolResult;
+    const result = (await client.callTool({ name: "coding_agent_interaction_reply", arguments: args })) as CallToolResult;
     assert.equal(result.isError, undefined);
     assert.deepEqual(result.structuredContent, { task_id: "task_1", request_id: "permission-1", state: "answered" });
     assert.equal(manager.calls[0]!.method, "replyToInteraction");
     assert.deepEqual(manager.calls[0]!.args, args);
 
     const invalid = (await client.callTool({
-      name: "zcode_interaction_reply",
+      name: "coding_agent_interaction_reply",
       arguments: { ...args, extra: true },
     })) as CallToolResult;
     assert.equal(invalid.isError, true, "unknown fields must be rejected before the manager runs");
@@ -193,10 +205,10 @@ test("zcode_interaction_reply forwards a bounded explicit decision", async () =>
   });
 });
 
-test("zcode_task maps the full TaskPackage and returns a receipt as structured content", async () => {
+test("coding_agent_task maps the full TaskPackage and returns a receipt as structured content", async () => {
   await withServer(async (client, manager) => {
     const result = (await client.callTool({
-      name: "zcode_task",
+      name: "coding_agent_task",
       arguments: fullTaskArguments(),
     })) as CallToolResult;
     assert.equal(result.isError, undefined);
@@ -220,10 +232,19 @@ test("zcode_task maps the full TaskPackage and returns a receipt as structured c
   });
 });
 
-test("zcode_task accepts empty arrays and an optional context", async () => {
+test("coding_agent_task preserves the Kimi executor and native model/reasoning/permission options", async () => {
+  await withServer(async (client, manager) => {
+    const args = { ...fullTaskArguments(), executor: "kimi", kimi: { model: "kimi-code/k3.1-pro", reasoning_level: "max", permission_mode: "manual" } };
+    const result = await client.callTool({ name: "coding_agent_task", arguments: args });
+    assert.equal(result.isError, undefined);
+    assert.deepEqual(manager.calls[0]!.args, args);
+  });
+});
+
+test("coding_agent_task accepts empty arrays and an optional context", async () => {
   await withServer(async (client, manager) => {
     await client.callTool({
-      name: "zcode_task",
+      name: "coding_agent_task",
       arguments: { ...fullTaskArguments(), context: "Extra context" },
     });
     const task = manager.calls[0]!.args as TaskPackage;
@@ -231,10 +252,10 @@ test("zcode_task accepts empty arrays and an optional context", async () => {
   });
 });
 
-test("zcode_task accepts and forwards an optional provider/model selection", async () => {
+test("coding_agent_task accepts and forwards an optional provider/model selection", async () => {
   await withServer(async (client, manager) => {
     const result = (await client.callTool({
-      name: "zcode_task",
+      name: "coding_agent_task",
       arguments: { ...fullTaskArguments(), model: { provider_id: "provider-1", model_id: "model-x", reasoning_level: "high" } },
     })) as CallToolResult;
     assert.equal(result.isError, undefined);
@@ -243,10 +264,10 @@ test("zcode_task accepts and forwards an optional provider/model selection", asy
   });
 });
 
-test("zcode_task rejects malformed model selections before the manager runs", async () => {
+test("coding_agent_task rejects malformed model selections before the manager runs", async () => {
   await withServer(async (client, manager) => {
     const result = (await client.callTool({
-      name: "zcode_task",
+      name: "coding_agent_task",
       arguments: { ...fullTaskArguments(), model: { provider_id: "provider-1", model_id: "model-x", extra: true } },
     })) as CallToolResult;
     assert.equal(result.isError, true);
@@ -254,7 +275,7 @@ test("zcode_task rejects malformed model selections before the manager runs", as
   });
 });
 
-test("zcode_task rejects unknown fields, missing arrays, and invalid task ids before the manager runs", async () => {
+test("coding_agent_task rejects unknown fields, missing arrays, and invalid task ids before the manager runs", async () => {
   await withServer(async (client, manager) => {
     const badCases: Array<Record<string, unknown>> = [
       { ...fullTaskArguments(), extra_field: true },
@@ -265,7 +286,7 @@ test("zcode_task rejects unknown fields, missing arrays, and invalid task ids be
     ];
     for (const arguments_ of badCases) {
       const result = (await client.callTool({
-        name: "zcode_task",
+        name: "coding_agent_task",
         arguments: arguments_,
       })) as CallToolResult;
       assert.equal(
@@ -284,10 +305,10 @@ test("zcode_task rejects unknown fields, missing arrays, and invalid task ids be
   });
 });
 
-test("zcode_status returns the TaskStatusRecord and maps the argument", async () => {
+test("coding_agent_status returns the TaskStatusRecord and maps the argument", async () => {
   await withServer(async (client, manager) => {
     const result = (await client.callTool({
-      name: "zcode_status",
+      name: "coding_agent_status",
       arguments: { task_id: "task_1" },
     })) as CallToolResult;
     assert.equal(result.isError, undefined);
@@ -300,10 +321,10 @@ test("zcode_status returns the TaskStatusRecord and maps the argument", async ()
   });
 });
 
-test("zcode_feedback returns the additive v0.1 snapshot", async () => {
+test("coding_agent_feedback returns the additive v0.1 snapshot", async () => {
   await withServer(async (client, manager) => {
     const result = (await client.callTool({
-      name: "zcode_feedback",
+      name: "coding_agent_feedback",
       arguments: { task_id: "task_1" },
     })) as CallToolResult;
     assert.equal(result.isError, undefined);
@@ -316,11 +337,11 @@ test("zcode_feedback returns the additive v0.1 snapshot", async () => {
   });
 });
 
-test("zcode_result returns TASK_NOT_FINISHED as a tool error with a stable code", async () => {
+test("coding_agent_result returns TASK_NOT_FINISHED as a tool error with a stable code", async () => {
   await withServer(async (client, manager) => {
     manager.error = new TaskManagerError("TASK_NOT_FINISHED", "task task_1 is not finished (status: running)");
     const result = (await client.callTool({
-      name: "zcode_result",
+      name: "coding_agent_result",
       arguments: { task_id: "task_1" },
     })) as CallToolResult;
     assert.equal(result.isError, true, "a semantic tool error must never look like success");
@@ -332,7 +353,7 @@ test("zcode_result returns TASK_NOT_FINISHED as a tool error with a stable code"
   });
 });
 
-test("zcode_result for waiting_for_master surfaces the subordinate decision verbatim", async () => {
+test("coding_agent_result for waiting_for_master surfaces the subordinate decision verbatim", async () => {
   await withServer(async (client, manager) => {
     manager.result = {
       ...manager.result,
@@ -341,7 +362,7 @@ test("zcode_result for waiting_for_master surfaces the subordinate decision verb
       issues: ["unsure about scope"],
     };
     const result = (await client.callTool({
-      name: "zcode_result",
+      name: "coding_agent_result",
       arguments: { task_id: "task_1" },
     })) as CallToolResult;
     assert.equal(result.isError, undefined);
@@ -352,10 +373,10 @@ test("zcode_result for waiting_for_master surfaces the subordinate decision verb
   });
 });
 
-test("zcode_continue passes snake_case fields through unchanged", async () => {
+test("coding_agent_continue passes snake_case fields through unchanged", async () => {
   await withServer(async (client, manager) => {
     const result = (await client.callTool({
-      name: "zcode_continue",
+      name: "coding_agent_continue",
       arguments: {
         task_id: "task_1",
         feedback: "Fix the failing test",
@@ -377,7 +398,7 @@ test("zcode_continue passes snake_case fields through unchanged", async () => {
       { task_id: "task_1", feedback: "x", unknown_field: 1 },
     ]) {
       const badResult = (await client.callTool({
-        name: "zcode_continue",
+        name: "coding_agent_continue",
         arguments: bad,
       })) as CallToolResult;
       assert.equal(badResult.isError, true, `expected a tool error for ${JSON.stringify(bad)}`);
@@ -386,10 +407,10 @@ test("zcode_continue passes snake_case fields through unchanged", async () => {
   });
 });
 
-test("zcode_cancel returns the updated status record", async () => {
+test("coding_agent_cancel returns the updated status record", async () => {
   await withServer(async (client, manager) => {
     const result = (await client.callTool({
-      name: "zcode_cancel",
+      name: "coding_agent_cancel",
       arguments: { task_id: "task_1" },
     })) as CallToolResult;
     assert.equal(result.isError, undefined);
@@ -404,7 +425,7 @@ test("TASK_ALREADY_EXISTS and TASK_NOT_FOUND become tool errors with their stabl
   await withServer(async (client, manager) => {
     manager.error = new TaskManagerError("TASK_ALREADY_EXISTS", "task_id already used: task_1");
     const create = (await client.callTool({
-      name: "zcode_task",
+      name: "coding_agent_task",
       arguments: fullTaskArguments(),
     })) as CallToolResult;
     assert.equal(create.isError, true);
@@ -413,7 +434,7 @@ test("TASK_ALREADY_EXISTS and TASK_NOT_FOUND become tool errors with their stabl
 
     manager.error = new TaskManagerError("TASK_NOT_FOUND", "unknown task_id: ghost");
     const status = (await client.callTool({
-      name: "zcode_status",
+      name: "coding_agent_status",
       arguments: { task_id: "ghost" },
     })) as CallToolResult;
     assert.equal(status.isError, true);
@@ -431,7 +452,7 @@ test("calling an unregistered tool is rejected by the MCP protocol", async () =>
   });
 });
 
-test("server info matches the frozen project identity", async () => {
+test("server info exposes the Coding Agent Bridge identity and package version", async () => {
   await withServer(async (client) => {
     const serverInfo = client.getServerVersion();
     assert.equal(serverInfo?.name, SERVER_NAME);

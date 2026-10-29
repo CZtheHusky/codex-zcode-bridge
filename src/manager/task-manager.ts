@@ -1002,7 +1002,7 @@ export class BridgeTaskManager implements ProgressTaskManager {
           return { task_id: taskId, status: status.status === "running" ? "running" : "queued", created_at: status.created_at };
         }
       }
-      // A normal zcode_continue can advance a scheduled task before its review arrives;
+      // A normal coding_agent_continue can advance a scheduled task before its review arrives;
       // without this comparison stale feedback could start another, unrelated attempt.
       if (input.expected_attempt !== undefined && input.expected_attempt !== status.attempt) {
         throw new TaskManagerError("TASK_STATE", `Expected attempt ${input.expected_attempt}; current attempt is ${status.attempt}`);
@@ -1010,7 +1010,7 @@ export class BridgeTaskManager implements ProgressTaskManager {
       if (!["completed", "failed", "waiting_for_master"].includes(status.status)) {
         throw new TaskManagerError(
           "TASK_STATE",
-          `zcode_continue is not allowed from status ${status.status}`,
+          `coding_agent_continue is not allowed from status ${status.status}`,
         );
       }
       if (status.cleanup_unverified) throw new TaskManagerError("TASK_STATE", "Cannot continue until unverified ZCode process cleanup is resolved");
@@ -1176,7 +1176,7 @@ export class BridgeTaskManager implements ProgressTaskManager {
       if (isTerminalStatus(status.status)) {
         throw new TaskManagerError(
           "TASK_STATE",
-          `zcode_cancel is not allowed from status ${status.status}`,
+          `coding_agent_cancel is not allowed from status ${status.status}`,
         );
       }
       const task = this.#store.readTask(taskId);

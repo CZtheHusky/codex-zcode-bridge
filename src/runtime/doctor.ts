@@ -189,7 +189,7 @@ export async function runBridgeDoctor(options: BridgeDoctorOptions = {}): Promis
   });
 
   // A1: summarize persisted observations of non-terminal tasks via the same
-  // judger used by zcode_status and zcode_events (bounded to 32 tasks).
+  // judger used by coding_agent_status and coding_agent_events (bounded to 32 tasks).
   const observedRoot: string | null = options.observationDataRoot ?? env["ZCODE_BRIDGE_DATA_DIR"]?.trim() ?? null;
   if (observedRoot && existsSync(observedRoot)) {
     try {

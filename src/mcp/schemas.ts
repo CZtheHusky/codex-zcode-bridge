@@ -16,14 +16,20 @@ const stringArray = z.array(z.string());
 
 export const zcodeTaskInputSchema = z
   .strictObject({
+    executor: z.enum(["zcode", "kimi"]).optional().describe("Local coding executor; defaults to zcode. Select kimi to use Kimi Code CLI."),
+    kimi: z.strictObject({
+      reasoning_level: z.string().trim().min(1).optional().describe("Kimi thinking effort, forwarded as native thinking. K3/K3.1 Pro and standard models currently support low/high/max; support depends on the model. Omit to preserve the native session/default setting. The runtime-reported level is authoritative."),
+      model: z.string().trim().min(1).optional().describe("Kimi configured local model alias; omit to use its session/default model."),
+      permission_mode: z.enum(["manual", "yolo", "auto"]).optional().describe("Kimi permission mode; defaults to yolo. Pending explicit approvals still require an authorized interaction reply."),
+    }).optional(),
     task_id: taskIdSchema,
     workspace: z.string().min(1),
     worktree_path: z.string().min(1).optional(),
     model: z.strictObject({
-      provider_id: z.string().trim().min(1),
-      model_id: z.string().trim().min(1),
-      reasoning_level: z.string().trim().min(1).optional(),
-    }).optional(),
+      provider_id: z.string().trim().min(1).describe("ZCode provider ID from coding_agent_model_catalog; not a Kimi provider."),
+      model_id: z.string().trim().min(1).describe("Exact ZCode model ID from coding_agent_model_catalog."),
+      reasoning_level: z.string().trim().min(1).optional().describe("Optional ZCode reasoning level: copy reasoning_levels[].value for this model from coding_agent_model_catalog; supported values vary by model."),
+    }).optional().describe("ZCode-only per-task model and reasoning override; for Kimi use kimi.model instead."),
     timeout_ms: z.number().int().min(60_000).max(14_400_000).optional(),
     objective: z.string().min(1),
     requirements: stringArray,
@@ -33,6 +39,9 @@ export const zcodeTaskInputSchema = z
     test_commands: stringArray,
     context: z.string().optional(),
   })
+  // MCP is the uncontrolled input boundary; shared-core callers use this documented contract.
+  .refine(task => task.executor === "kimi" ? task.model === undefined : task.kimi === undefined,
+    { message: "Kimi tasks use kimi options; ZCode tasks use model" })
   .describe("Full TaskPackage; workspace is the the calling host project root. Optional worktree_path is an existing execution directory selected and prepared by the calling host; the Bridge never creates or selects worktrees. The five array fields must be present (empty allowed), context is optional.");
 
 export const taskIdOnlyInputSchema = z.strictObject({

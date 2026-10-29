@@ -50,8 +50,8 @@ function assertTempPath(candidate, prefix) {
 async function tool(name, args) {
   return structured(await client.callTool({ name, arguments: args }), name);
 }
-async function getStatus(taskId) { return tool("zcode_status", { task_id: taskId }); }
-async function getEvents(taskId) { return tool("zcode_events", { task_id: taskId, after_seq: 0, limit: 200, wait_ms: 0 }); }
+async function getStatus(taskId) { return tool("coding_agent_status", { task_id: taskId }); }
+async function getEvents(taskId) { return tool("coding_agent_events", { task_id: taskId, after_seq: 0, limit: 200, wait_ms: 0 }); }
 
 try {
   dataRoot = await mkdtemp(path.join(tmpdir(), dataPrefix));
@@ -77,7 +77,7 @@ try {
   for (let index = 0; index < taskIds.length; index += 1) {
     const taskId = taskIds[index];
     submitted.push(taskId);
-    const receipt = await tool("zcode_task", {
+    const receipt = await tool("coding_agent_task", {
       task_id: taskId,
       workspace: workspaces[index],
       model,
@@ -114,7 +114,7 @@ try {
   const outcomes = [];
   for (let index = 0; index < taskIds.length; index += 1) {
     const taskId = taskIds[index];
-    const result = await tool("zcode_result", { task_id: taskId });
+    const result = await tool("coding_agent_result", { task_id: taskId });
     const events = await getEvents(taskId);
     const selected = events.events.find((event) => event.type === "model_selected");
     assertDesktopRegistered(events, taskId);
@@ -159,7 +159,7 @@ try {
   for (let index = 0; index < worktreeTaskIds.length; index += 1) {
     const taskId = worktreeTaskIds[index];
     submitted.push(taskId);
-    worktreeReceipts.push(await tool("zcode_task", {
+    worktreeReceipts.push(await tool("coding_agent_task", {
       task_id: taskId,
       workspace: sourceProject,
       worktree_path: worktreePaths[index],
@@ -187,7 +187,7 @@ try {
   const worktreeOutcomes = [];
   for (let index = 0; index < worktreeTaskIds.length; index += 1) {
     const taskId = worktreeTaskIds[index];
-    const result = await tool("zcode_result", { task_id: taskId });
+    const result = await tool("coding_agent_result", { task_id: taskId });
     const events = await getEvents(taskId);
     const selected = events.events.find((event) => event.type === "model_selected");
     assertDesktopRegistered(events, taskId);
@@ -213,7 +213,7 @@ try {
       try {
         const status = await getStatus(taskId);
         if (!terminal.has(status.status)) {
-          const cancelled = await tool("zcode_cancel", { task_id: taskId });
+          const cancelled = await tool("coding_agent_cancel", { task_id: taskId });
           if (terminal.has(cancelled.status)) terminalConfirmed.add(taskId);
         } else terminalConfirmed.add(taskId);
       } catch (error) {

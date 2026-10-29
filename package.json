@@ -2,7 +2,7 @@
   "name": "codex-zcode-bridge",
   "version": "1.2.7",
   "private": true,
-  "description": "本地 Codex 插件与 MCP 服务，用于委派和审查 ZCode 开发任务。",
+  "description": "Coding Agent Bridge：委派、跟进并验收本机 ZCode / Kimi 编码任务，支持模型选择及受环境限制的预约唤醒。",
   "type": "module",
   "license": "Apache-2.0",
   "exports": {

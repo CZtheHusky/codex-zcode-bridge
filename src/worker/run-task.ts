@@ -13,6 +13,7 @@ import type {
   WorkspaceRef,
   ZCodeInteractionRequest,
 } from "../interfaces.js";
+import { KimiAdapter } from "../adapters/kimi-adapter.js";
 import { ZCodeAppServerAdapter } from "../adapters/zcode-app-server-adapter.js";
 import type { ZCodeRunOutcome } from "../adapters/zcode-adapter.js";
 import { BridgeError } from "../runtime/errors.js";
@@ -95,7 +96,7 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<RunW
 
   const startedAt = initialStatus.started_at ?? now().toISOString();
   store.writeStatus(taskId, { status: "running", started_at: startedAt, worker_pid: process.pid }, attempt);
-  store.appendEvent(taskId, "worker_running", "Task worker is preparing the ZCode runtime");
+  store.appendEvent(taskId, "worker_running", `Task worker is preparing the ${task.executor === "kimi" ? "Kimi" : "ZCode"} runtime`);
   store.writeAttemptMeta(taskId, attempt, "started.json", {
     worker_pid: process.pid,
     started_at: startedAt,
@@ -205,10 +206,10 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<RunW
 
     // B4 runtime-confirmed execution profile (model / reasoning depth).
     const modelProfile: ExecutionProfile = {
-      executor: "zcode",
+      executor: task.executor ?? "zcode",
       provider_id: null,
       model_id: null,
-      requested_model: task.model ? `${task.model.provider_id}/${task.model.model_id}` : null,
+      requested_model: task.executor === "kimi" ? task.kimi?.model ?? null : task.model ? `${task.model.provider_id}/${task.model.model_id}` : null,
       requested_reasoning_level: task.model?.reasoning_level ?? null,
       effective_reasoning_level: null,
       effective_reasoning_level_source: "not_reported",
@@ -230,12 +231,13 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<RunW
       lastModelOutputAt = Date.now();
     };
     try {
-      if (options.resolver) {
+      if (options.resolver && task.executor !== "kimi") {
         // Surface configuration problems before spending an adapter run; the
         // real adapter resolves internally as well.
         await options.resolver.resolve();
       }
-      const adapter = options.adapter ?? new ZCodeAppServerAdapter({
+      const Adapter = task.executor === "kimi" ? KimiAdapter : ZCodeAppServerAdapter;
+      const adapter = options.adapter ?? new Adapter({
         host: options.host,
         ...(options.resolver ? { resolver: options.resolver } : {}),
         onEvent: (event) => {
@@ -325,7 +327,7 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<RunW
             report_candidate: checkpoint.reportCandidate,
             cleanup_error: checkpoint.cleanupError ?? null,
             cleanup_verified: checkpoint.cleanupVerified === true,
-            usage_normalized: normalizeUsage(checkpoint.usage, { source: "zcode_runtime_turn", scope: checkpoint.sessionId ? `session:${checkpoint.sessionId}` : null, observedAt: now().toISOString() }),
+            usage_normalized: normalizeUsage(checkpoint.usage, { source: task.executor === "kimi" ? "kimi_runtime_session" : "zcode_runtime_turn", scope: checkpoint.sessionId ? `session:${checkpoint.sessionId}` : null, observedAt: now().toISOString() }),
             model_profile: modelProfile,
           });
         },
@@ -523,7 +525,7 @@ export async function runWorkerTask(options: RunWorkerTaskOptions): Promise<RunW
       notes: timingNotes,
     };
     const usage: NormalizedUsage | null = normalizeUsage(outcome?.usage ?? null, {
-      source: "zcode_runtime_turn",
+      source: task.executor === "kimi" ? "kimi_runtime_session" : "zcode_runtime_turn",
       scope: outcome?.sessionId ? `session:${outcome.sessionId}` : null,
       observedAt: finishedAt,
     });

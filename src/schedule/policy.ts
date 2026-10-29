@@ -8,7 +8,7 @@ import type { TaskPackage, TaskResult } from "../interfaces.js";
 import type { ScheduleAttentionReason } from "./types.js";
 
 /** Appended to requirements so ONLY scheduled tasks must self-assess; generic
- * zcode_task submissions are untouched and may omit acceptance_met. */
+ * coding_agent_task submissions are untouched and may omit acceptance_met. */
 export const SCHEDULE_SELF_ASSESSMENT_REQUIREMENT =
   "This task runs under a scheduled autonomous loop. Your final JSON response must additionally include the boolean field acceptance_met: your honest assessment of whether this task's acceptance criteria are met by the completed work. This self-assessment is not the master's acceptance; the master still verifies independently. Set acceptance_met=false when the criteria are not yet met, and never set it true merely because work stopped.";
 
@@ -54,7 +54,7 @@ export function evaluateTerminalResult(taskId: string, result: TaskResult): Term
     case "waiting_for_master":
       return { action: "escalate", reason: "needs_decision" };
     case "failed":
-      if (result.error_code === "zcode_usage_exhausted") return { action: "escalate", reason: "usage_exhausted" };
+      if (result.error_code === "zcode_usage_exhausted" || result.error_code === "kimi_usage_exhausted") return { action: "escalate", reason: "usage_exhausted" };
       // A timeout outcome only survives with a verified process-tree cleanup;
       // an unverified cleanup surfaces as error_code "cleanup_failed" instead.
       // Continuation additionally requires an existing session to resume.
@@ -99,11 +99,11 @@ export interface NotificationMessageInput {
 export function buildNotificationMessage(input: NotificationMessageInput): string {
   const lines = [
     `Event ID: ${JSON.stringify(input.eventId)}`,
-    `[ZCode Bridge schedule] task "${input.taskId}" attempt ${String(input.attempt)}: ${REASON_HEADLINES[input.reason]}.`,
+    `[Coding Agent Bridge schedule] task "${input.taskId}" attempt ${String(input.attempt)}: ${REASON_HEADLINES[input.reason]}.`,
     "This is a scheduler wakeup, not task acceptance; execution status and goal review are separate.",
-    `- Inspect the authoritative state yourself with zcode_schedule_status (task_id "${input.taskId}"), then zcode_status / zcode_result / zcode_events on the task.`,
-    "- If the agent self-assessed acceptance_met=true: independently verify the work, then call zcode_schedule_review with accepted=true, or accepted=false plus concrete feedback to resume the SAME ZCode session.",
-    "- For a pending permission or input request: decide with the user and reply via zcode_interaction_reply using the exact request_id; the scheduler never auto-approves.",
+    `- Inspect the authoritative state yourself with coding_agent_schedule_status (task_id "${input.taskId}"), then coding_agent_status / coding_agent_result / coding_agent_events on the task.`,
+    "- If the agent self-assessed acceptance_met=true: independently verify the work, then call coding_agent_schedule_review with accepted=true, or accepted=false plus concrete feedback to resume the SAME executor session.",
+    "- For a pending permission or input request: decide with the user and reply via coding_agent_interaction_reply using the exact request_id; the scheduler never auto-approves.",
     "- If provider quota is exhausted or cleanup is unverified: stop, inform the user, and do not auto-retry or continue.",
     "- Notify the human only when you accept the outcome or a human decision is required.",
   ];

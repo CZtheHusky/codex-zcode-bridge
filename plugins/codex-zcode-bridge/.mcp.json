@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "zcode_bridge": {
+    "coding_agent_bridge": {
       "command": "node",
       "args": ["./dist/bridge.mjs"],
       "cwd": ".",

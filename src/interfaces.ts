@@ -86,6 +86,9 @@ export interface AttemptTiming {
 }
 
 export interface TaskPackage {
+  /** Persisted executor; omitted keeps existing ZCode tasks compatible. */
+  executor?: "zcode" | "kimi";
+  kimi?: { model?: string; reasoning_level?: string; permission_mode?: "manual" | "yolo" | "auto" };
   task_id: string;
   workspace: string; // absolute the calling host project path; also the ZCode Desktop project identity
   /** Optional actual execution directory chosen and prepared by the calling host. Bridge never creates or selects it. */
@@ -297,7 +300,7 @@ export interface TaskProgressPage {
   has_more: boolean;
   /** Events omitted by summary view; cursor still advances across all scanned events. */
   omitted_events?: number;
-  /** A1 additive: the same unified observation returned by zcode_status. */
+  /** A1 additive: the same unified observation returned by coding_agent_status. */
   observation?: TaskObservation;
   /** B1 additive: byte budget exhausted before the log end. */
   scan_incomplete?: boolean;

@@ -13,6 +13,8 @@ export type BridgeErrorCode =
   | "worker_lost"
   | "invalid_json"
   | "invalid_agent_report"
+  | "kimi_nonzero_exit"
+  | "kimi_usage_exhausted"
   | "zcode_nonzero_exit"
   | "zcode_usage_exhausted";
 

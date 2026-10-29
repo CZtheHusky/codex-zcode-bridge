@@ -25,10 +25,18 @@ stdout 协议帧与审批持久化边界（ADR-008）：换行分隔的完整 JS
 
 ## 预约运行环境（ADR-010）
 
-默认 Codex stdio 装配四个调度工具。`zcode_schedule` 的首版监督器只支持 Linux `systemd-run --user`：runner 使用 `Type=exec`、`Restart=on-failure`、`RestartSec=5s`、`KillMode=process` 和持久化 UUID 单元名。要求 systemd-run 支持 `--expand-environment=no`（systemd 254 起），禁止参数环境展开；本机 systemd 255 已通过下述离线闭环实测，其他版本未认证。启动回执核对 active/MainPID/cgroup；停止 runner 不代替 TaskManager 对独立 worker 的清理验证。缺可用 user systemd 时显式拒绝预约，不回退到 PTY、tmux 或 nohup；不自动开启 linger，不保证注销、关机或 App 关闭后的行为。
+默认 Codex stdio 装配四个调度工具。`coding_agent_schedule` 的首版监督器只支持 Linux `systemd-run --user`：runner 使用 `Type=exec`、`Restart=on-failure`、`RestartSec=5s`、`KillMode=process` 和持久化 UUID 单元名。要求 systemd-run 支持 `--expand-environment=no`（systemd 254 起），禁止参数环境展开；本机 systemd 255 已通过下述离线闭环实测，其他版本未认证。启动回执核对 active/MainPID/cgroup；停止 runner 不代替 TaskManager 对独立 worker 的清理验证。缺可用 user systemd 时显式拒绝预约，不回退到 PTY、tmux 或 nohup；不自动开启 linger，不保证注销、关机或 App 关闭后的行为。
 
 监督标识与 `runner.log` 路径由 schedule 回执/status 返回。runner 入口在源码构建为 `dist/src/schedule/runner-main.js`，插件为 `worker/schedule-runner.mjs`；与原 `dist/bridge.mjs`、`worker/worker-main.mjs` 一起构建和校验。运行数据位于 `<dataRoot>/.schedules/`，不改变 `.tasks/` 的任务事实。
 
 `CODEX_APP_TOOLS_PIPE_PATH` 只从 MCP 宿主环境取得，写到宿主私有 `.schedules/runtime.json`，每次工具调用可刷新，runner 每次发送重新读取。它不加入 worker 环境白名单，不放进 TaskPackage 或 ZCode prompt；user systemd manager 会继承自身环境，因此 runner 经 `/usr/bin/env -i` 清空环境，再显式注入现有 worker 配置键清单、必要 host/plugin 标识，以及仅供调度宿主使用的 `XDG_RUNTIME_DIR`、`DBUS_SESSION_BUS_ADDRESS`、`ELECTRON_RUN_AS_NODE`；这三个键没有加入 ZCode worker 白名单，不能仅靠 `--setenv` 声称环境隔离。`thread_id` 由宿主显式绑定当前原聊天，不从别的进程环境推断。
 
 App pipe 使用观测到的本机 `send_message_to_thread` 协议，Linux App 26.1016.61520 / codex-app-tools 0.1.6 的历史实测不构成公开或跨版本保证。pipe 不可用时 outbox 保留错误并重试；成功回执只有交付意义，可能重复，不能证明验收通过。本机真实 systemd/ZCode/原聊天验收链路已验证至消息送达与独立接受；新版调度的空闲聊天新轮次仍未验证，见 [ADR-010](decisions/ADR-010-scheduled-zcode-and-codex-wakeup.md#当前验证边界2026-10-28)。
+
+## Kimi 执行器增量（ADR-012）
+
+`TaskPackage.executor` 可选 zcode/kimi，省略仍走原路径。Kimi 使用 `kimi: { model?, permission_mode? }`，默认 yolo，不接受 ZCode model 字段；续作保持已持久化的 executor 与 session。公开工具名保持兼容，包含预约工具；ZCode doctor/catalog/default_model 不用于诊断或配置 Kimi。兼容字段 zcode_session_id、zcode_pid、zcode_output 在 Kimi 任务中存放 Kimi 对应证据，执行 profile.executor 和 usage.source 区分来源。
+
+KimiAdapter 通过认证的 loopback Server API 执行；先 GET snapshot 恢复冷会话并取得游标，再订阅确认并提交独立 prompt_id。只接受当前 session/main agent/prompt/turn，失败、断流、文本偏移不符及无效报告均不得完成；thinking 不外发。审批/问题走既有 interaction 存储；成功和失败均验证进程树清理。Kimi 明确额度耗尽使用 kimi_usage_exhausted，普通 429 为 kimi_nonzero_exit；调度额度故障只升级通知，不自动续作。
+
+配置、版本与验证范围见 [ADR-012](decisions/ADR-012-kimi-executor.md) 和[验证报告](reports/2026-10-28-kimi-validation.md)。本节不扩展原有 ZCode 的历史验证结论。

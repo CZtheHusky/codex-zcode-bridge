@@ -12,9 +12,9 @@ import { ScheduleController } from "../src/schedule/controller.js";
 import { makeScheduleFixture, ScriptedManager, scheduleTaskPackage, THREAD_ID } from "./schedule-helpers.js";
 
 const FROZEN_TOOLS = [
-  "zcode_cancel", "zcode_clear_default_model", "zcode_continue", "zcode_default_model",
-  "zcode_doctor", "zcode_events", "zcode_feedback", "zcode_interaction_reply",
-  "zcode_model_catalog", "zcode_result", "zcode_set_default_model", "zcode_status", "zcode_task",
+  "coding_agent_cancel", "coding_agent_clear_default_model", "coding_agent_continue", "coding_agent_default_model",
+  "coding_agent_doctor", "coding_agent_events", "coding_agent_feedback", "coding_agent_interaction_reply",
+  "coding_agent_model_catalog", "coding_agent_result", "coding_agent_set_default_model", "coding_agent_status", "coding_agent_task",
 ];
 
 async function withClient(server: McpServer, run: (client: Client) => Promise<void>): Promise<void> {
@@ -57,9 +57,12 @@ test("injected scheduling registers exactly the four additional tools", async ()
       schedule: { controller, appPipeSource: () => "/tmp/app.pipe" },
     });
     await withClient(server, async (client) => {
-      assert.deepEqual(await toolNames(client), [...FROZEN_TOOLS, "zcode_schedule", "zcode_schedule_cancel", "zcode_schedule_review", "zcode_schedule_status"].sort());
+      assert.deepEqual(await toolNames(client), [...FROZEN_TOOLS, "coding_agent_schedule", "coding_agent_schedule_cancel", "coding_agent_schedule_review", "coding_agent_schedule_status"].sort());
+      assert.match(client.getInstructions()!, /coding_agent_schedule/);
+      assert.match(client.getInstructions()!, /Linux with user systemd/);
+      assert.match(client.getInstructions()!, /original thread_id/);
       const receipt = await client.callTool({
-        name: "zcode_schedule",
+        name: "coding_agent_schedule",
         arguments: { task: scheduleTaskPackage(), start_at: "2026-10-27T12:00:00+08:00", thread_id: THREAD_ID },
       });
       assert.equal(receipt.isError, undefined);
@@ -68,16 +71,16 @@ test("injected scheduling registers exactly the four additional tools", async ()
       assert.equal(structured.status, "scheduled");
       assert.equal(structured.supervisor?.unit, fixture.store.readSpec("goal_1").supervisor_unit);
       assert.equal(fixture.store.readRuntime()?.app_pipe_path, "/tmp/app.pipe", "each call refreshes the pipe location");
-      const status = await client.callTool({ name: "zcode_schedule_status", arguments: { task_id: "goal_1" } });
+      const status = await client.callTool({ name: "coding_agent_schedule_status", arguments: { task_id: "goal_1" } });
       const statusView = scheduleStatusSchema.parse(status.structuredContent);
       assert.equal(statusView.schedule.status, "scheduled");
       assert.equal(statusView.execution, null, "no Bridge task exists before start_at");
       await controller.dispatch("goal_1");
-      const active = await client.callTool({ name: "zcode_schedule_status", arguments: { task_id: "goal_1" } });
+      const active = await client.callTool({ name: "coding_agent_schedule_status", arguments: { task_id: "goal_1" } });
       assert.equal(active.isError, undefined, "an unfinished result must satisfy the output schema with a null decision verdict");
       const activeView = scheduleStatusSchema.parse(active.structuredContent);
       assert.equal(activeView.execution?.needs_master_decision, null);
-      const cancelled = await client.callTool({ name: "zcode_schedule_cancel", arguments: { task_id: "goal_1" } });
+      const cancelled = await client.callTool({ name: "coding_agent_schedule_cancel", arguments: { task_id: "goal_1" } });
       assert.equal(cancelled.isError, undefined, "cancellation must return its declared task_id in the MCP result");
       assert.deepEqual(cancelled.structuredContent, { task_id: "goal_1", schedule_status: "cancelled", task_status: "cancelled" });
     });
@@ -100,17 +103,17 @@ test("schedule tool inputs are validated before reaching the controller", async 
     const server = createBridgeServer({ taskManager: fixture.manager, schedule: { controller } });
     await withClient(server, async (client) => {
       const noTimezone = await client.callTool({
-        name: "zcode_schedule",
+        name: "coding_agent_schedule",
         arguments: { task: scheduleTaskPackage(), start_at: "2026-10-27T12:00:00", thread_id: THREAD_ID },
       });
       assert.equal(noTimezone.isError, true, "start_at without a timezone must be rejected");
       const badThread = await client.callTool({
-        name: "zcode_schedule",
+        name: "coding_agent_schedule",
         arguments: { task: scheduleTaskPackage(), start_at: "2026-10-27T12:00:00Z", thread_id: "guess" },
       });
       assert.equal(badThread.isError, true);
       const extraField = await client.callTool({
-        name: "zcode_schedule_status",
+        name: "coding_agent_schedule_status",
         arguments: { task_id: "goal_1", unexpected: true },
       });
       assert.equal(extraField.isError, true, "unknown fields are rejected");
@@ -134,10 +137,10 @@ test("schedule errors surface as MCP tool errors with stable codes", async () =>
     });
     const server = createBridgeServer({ taskManager: fixture.manager, schedule: { controller } });
     await withClient(server, async (client) => {
-      const unknown = await client.callTool({ name: "zcode_schedule_status", arguments: { task_id: "ghost" } });
+      const unknown = await client.callTool({ name: "coding_agent_schedule_status", arguments: { task_id: "ghost" } });
       assert.equal(unknown.isError, true);
       assert.match(unknown.content.filter((item) => item.type === "text").map((item) => item.text).join("\n"), /SCHEDULE_NOT_FOUND/);
-      const cancelled = await client.callTool({ name: "zcode_schedule_cancel", arguments: { task_id: "ghost" } });
+      const cancelled = await client.callTool({ name: "coding_agent_schedule_cancel", arguments: { task_id: "ghost" } });
       assert.equal(cancelled.isError, true);
       assert.match(cancelled.content.filter((item) => item.type === "text").map((item) => item.text).join("\n"), /SCHEDULE_NOT_FOUND/);
     });

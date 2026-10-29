@@ -106,7 +106,7 @@ export class ZCodeModelSettings {
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         const code = error instanceof BridgeError ? error.code : "provider_config_invalid";
-        throw new BridgeError(code, `Could not load the ZCode runtime/provider configuration after retrying: ${reason}. Run zcode_doctor for the failing path, correct it, then call zcode_model_catalog again.`, { cause: error });
+        throw new BridgeError(code, `Could not load the ZCode runtime/provider configuration after retrying: ${reason}. Run coding_agent_doctor for the failing path, correct it, then call coding_agent_model_catalog again.`, { cause: error });
       }
     }
     const cached = await readModelCatalogCache(source.cachePath);
@@ -135,7 +135,7 @@ export class ZCodeModelSettings {
     }
     const reason = lastError instanceof Error ? lastError.message : String(lastError);
     const code = lastError instanceof BridgeError ? lastError.code : "zcode_nonzero_exit";
-    throw new BridgeError(code, `Model catalog refresh failed after re-reading provider config and retrying: ${reason}. Run zcode_doctor to identify a missing or invalid runtime/provider file; after correcting it, call zcode_model_catalog again.`, { cause: lastError });
+    throw new BridgeError(code, `Model catalog refresh failed after re-reading provider config and retrying: ${reason}. Run coding_agent_doctor to identify a missing or invalid runtime/provider file; after correcting it, call coding_agent_model_catalog again.`, { cause: lastError });
   }
 
   async #resolveCatalogSource(workspacePath: string): Promise<CatalogSource> {

@@ -31,7 +31,7 @@ for (const [label, manifest] of [["plugin.json", plugin], [".codex-plugin/plugin
   }
 }
 for (const [label, mcp] of [["mcp.json", portableMcp], [".mcp.json", codexMcp]]) {
-  const server = mcp.mcpServers?.zcode_bridge;
+  const server = mcp.mcpServers?.coding_agent_bridge;
   if (server?.command !== "node" || !Array.isArray(server.args) || server.args[0] !== "./dist/bridge.mjs") {
     throw new Error(`${label} must launch ./dist/bridge.mjs with node`);
   }

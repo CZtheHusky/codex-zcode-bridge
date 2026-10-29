@@ -304,7 +304,7 @@ export class ScheduleController {
   }
 
   /** Terminal attempt with acceptance_met=true: wake the original thread for
-   * independent review; the goal now waits for zcode_schedule_review. */
+   * independent review; the goal now waits for coding_agent_schedule_review. */
   async requestReview(taskId: string, attempt: number): Promise<void> {
     await this.#locked(taskId, async (state, spec) => {
       if (state.cancel_requested || state.status === "cancelled" || state.status === "accepted" || state.status === "failed") return;

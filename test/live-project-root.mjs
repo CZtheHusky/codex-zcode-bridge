@@ -49,7 +49,7 @@ function structured(result, label) {
 async function tool(name, args) {
   return structured(await client.callTool({ name, arguments: args }), name);
 }
-async function status() { return tool("zcode_status", { task_id: taskId }); }
+async function status() { return tool("coding_agent_status", { task_id: taskId }); }
 async function delay(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
 try {
@@ -65,7 +65,7 @@ try {
   client = new Client({ name: "codex-zcode-project-root-e2e", version: "0.1.0" }, { capabilities: {} });
   await client.connect(transport);
 
-  const receipt = await tool("zcode_task", {
+  const receipt = await tool("coding_agent_task", {
     task_id: taskId,
     workspace: repoRoot,
     worktree_path: worktreePath,
@@ -79,7 +79,7 @@ try {
   });
   submitted = true;
 
-  const initialEvents = await tool("zcode_events", { task_id: taskId, after_seq: 0, wait_ms: 0 });
+  const initialEvents = await tool("coding_agent_events", { task_id: taskId, after_seq: 0, wait_ms: 0 });
   const workspaceEvent = initialEvents.events.find((event) => event.type === "workspace_ready");
   assert.ok(workspaceEvent, "workspace_ready event is missing");
   assert.equal(workspaceEvent.details.project_path, repoRoot, "Desktop project identity must use this project root");
@@ -96,8 +96,8 @@ try {
   assert.ok(terminal.has(current.status), "timed out waiting for the task");
   terminalConfirmed = true;
 
-  const result = await tool("zcode_result", { task_id: taskId });
-  const events = await tool("zcode_events", { task_id: taskId, after_seq: 0, limit: 200, wait_ms: 0 });
+  const result = await tool("coding_agent_result", { task_id: taskId });
+  const events = await tool("coding_agent_events", { task_id: taskId, after_seq: 0, limit: 200, wait_ms: 0 });
   assert.equal(result.status, "completed", `${result.error_code ?? result.summary}`);
   assert.equal(result.exit_code, 0);
   assert.ok(result.session_id);
@@ -118,7 +118,7 @@ try {
 } finally {
   if (client && submitted && !terminalConfirmed) {
     try {
-      const canceled = await tool("zcode_cancel", { task_id: taskId });
+      const canceled = await tool("coding_agent_cancel", { task_id: taskId });
       terminalConfirmed = terminal.has(canceled.status);
       const deadline = Date.now() + 30_000;
       while (!terminalConfirmed && Date.now() < deadline) {

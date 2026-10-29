@@ -22,7 +22,7 @@ import { ZCodeModelSettings } from "../runtime/model-settings.js";
 import { codexHostProfile, validateHostProfile, type BridgeHostProfile } from "./profile.js";
 import { createWorkerSpawner, workerEntryPath } from "../manager/spawn-worker.js";
 import { createPlatformProbe } from "../runtime/process-probe.js";
-import { SERVER_VERSION } from "../mcp/server.js";
+import { SERVER_NAME, SERVER_VERSION } from "../mcp/server.js";
 import { ScheduleController } from "../schedule/controller.js";
 import { ScheduleStore, schedulesRootFor } from "../schedule/store.js";
 import { createSystemdRunSupervisor } from "../schedule/supervisor.js";
@@ -129,7 +129,7 @@ export async function startBridge(host: BridgeHostProfile = codexHostProfile(), 
     taskManager: manager,
     doctor: () => runBridgeDoctor({ env: runtimeEnv, dataRoot, resolver: { host } }),
     modelSettings,
-    serverInfo: { name: host.name, version },
+    serverInfo: { name: host.name === codexHostProfile().name ? SERVER_NAME : host.name, version },
     instructions: host.instructions,
     schedule: scheduleController ? {
       controller: scheduleController,

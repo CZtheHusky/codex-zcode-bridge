@@ -32,8 +32,8 @@ PR #47 claimant 扫描与预算返修（本轮，2026-10-18，含 review-round-1
 - Windows 进程树终止（ADR-009）：本机 Node 22/24 全量、专项单测、有界真实 fixture（正向身份绑定终止、错误指纹拒绝且零信号、缺身份拒绝、独立收束）与 Codex 九脚本十用例反例通过；2026-10-18 PR #47 返修后维护者原始反例、组合矩阵、真实 Manager 消费门禁与预算语义回归通过（attempt-1 版本 44/3/93/19 项为分文件历史计数；attempt-2 版本为 53/4 项加 evaluator 探针 10/10×3 Node）。claimant 闭包外（未观察中间祖先）不可证明，外来换代父不排除未证明的后代，不以完整清理名义宣称。
 - TaskManager 生命周期：`queued` / `running` / `completed` / `failed` / `cancelled` / `waiting_for_master`，含 attempt 独占、续跑归档、清理验证。
 - MCP 共享核心工具 13 个，清单见 `INTERFACES.md`；默认 Codex stdio 宿主另装配下述四个调度工具。
-- `zcode_events` 的增量事件、cursor 与 raw/summary 视图。
-- `zcode_feedback` 的 `TaskFeedbackSnapshotV01`。
+- `coding_agent_events` 的增量事件、cursor 与 raw/summary 视图。
+- `coding_agent_feedback` 的 `TaskFeedbackSnapshotV01`。
 - 工作区隔离：执行目录由调用宿主准备，Bridge 不创建也不删除 worktree。
 - 模型选择：可按任务覆盖 provider/model，不持久化为工作区默认。
 - 并发：同一 data root 内默认最多 8 个 worker，可用 `ZCODE_BRIDGE_MAX_CONCURRENT_WORKERS` 在 1–8 之间调整。
@@ -42,10 +42,10 @@ PR #47 claimant 扫描与预算返修（本轮，2026-10-18，含 review-round-1
 
 ## 实验
 
-- 预约执行与原 Codex 聊天验收（[ADR-010](decisions/ADR-010-scheduled-zcode-and-codex-wakeup.md)）：默认 Codex stdio 宿主装配 `zcode_schedule` / `zcode_schedule_status` / `zcode_schedule_review` / `zcode_schedule_cancel`；generic core 保持可选注入。首版仅 Linux `systemd-run --user`，一次带时区的绝对开始时间对应同一目标与 task ID。已提交结果的 `acceptance_met=false` 静默复用 session 续作，`true` 唤醒绑定原聊天，只有 Codex 独立验收并接受后目标才结束；拒绝须给具体反馈并继续同 session。正常推进不通知用户，仅独立验收通过或关键问题需处理时通知。
+- 预约执行与原 Codex 聊天验收（[ADR-010](decisions/ADR-010-scheduled-zcode-and-codex-wakeup.md)）：默认 Codex stdio 宿主装配 `coding_agent_schedule` / `coding_agent_schedule_status` / `coding_agent_schedule_review` / `coding_agent_schedule_cancel`；generic core 保持可选注入。首版仅 Linux `systemd-run --user`，一次带时区的绝对开始时间对应同一目标与 task ID。已提交结果的 `acceptance_met=false` 静默复用 session 续作，`true` 唤醒绑定原聊天，只有 Codex 独立验收并接受后目标才结束；拒绝须给具体反馈并继续同 session。正常推进不通知用户，仅独立验收通过或关键问题需处理时通知。
 - 调度记录、稳定事件 ID 和至少一次通知 outbox 可恢复；通知回执丢失可能重复，送达不等于验收。监督 runner 崩溃后恢复既有任务与意图；不会自动开启 linger，也不保证注销、关机或 App 关闭后工作。超时须已保存 session 且清理验证通过才自动续作；额度耗尽、缺失/无效自评、失败、待决策与权限请求不盲目续作或批准。取消调用中断后 runner 恢复已持久化的停止意图，清理失败以 `cancel_failed` 唤醒并暂停自动重试/续作。
 
-- `zcode_progress_probe`：默认关闭，只有直接调用 `createBridgeServer({ enableExperiments: true })` 才注册。
+- `coding_agent_progress_probe`：默认关闭，只有直接调用 `createBridgeServer({ enableExperiments: true })` 才注册。
 - Desktop 索引同步：best effort，事务内校验 schema 与 Bridge owner；尚未写入真实 Desktop 数据库。
 - 可选 headless 浏览器宿主（ADR-007）：默认关闭；显式启用后通过独立managed CDP后端处理browserList/browserExecute。1.2.3修复版本曾在Windows Edge和ZCode Agent 0.16.9验证原生工具链；历史本机1.2.4整合验证见[审查说明](reports/2026-10-15-browser-and-transport-fixes.md)。本轮1.2.6修复包已完成Windows Edge/Linux Chromium的打包MCP初始化与真实browser backend操作，范围见[本轮记录](reports/2026-10-17-filesystem-root-guards.md)，不等同其它模型或app-server版本的原生工具认证。桌面IAB、Computer Use、录制及子会话派生未实现。
 
@@ -76,3 +76,15 @@ PR #47 claimant 扫描与预算返修（本轮，2026-10-18，含 review-round-1
 ## 核对来源
 
 `package.json`、`src/schedule/`、`src/mcp/schemas.ts`、`src/host/stdio.ts`、`src/mcp/server.ts`、`src/worker/run-task.ts`、`src/adapters/zcode-app-server-adapter.ts`、`docs/ARCHITECTURE.md`、`docs/INTERFACES.md`、GitHub Actions 运行记录。文中标注"未运行"的条目没有被上述来源证实，保持未验证状态。
+
+## Kimi 执行器增量（ADR-012）
+
+`TaskPackage.executor` 可选 zcode/kimi，省略仍走原路径。Kimi 使用 `kimi: { model?, reasoning_level?, permission_mode? }`，默认 yolo，不接受 ZCode model 字段；续作保持已持久化的 executor 与 session。工具改名见 ADR-013；参数与持久记录保持兼容；ZCode doctor/catalog/default_model 不用于诊断或配置 Kimi。兼容字段 zcode_session_id、zcode_pid、zcode_output 在 Kimi 任务中存放 Kimi 对应证据，执行 profile.executor 和 usage.source 区分来源。
+
+KimiAdapter 通过认证的 loopback Server API 执行；先 GET snapshot 恢复冷会话并取得游标，再订阅确认并提交独立 prompt_id。只接受当前 session/main agent/prompt/turn，失败、断流、文本偏移不符及无效报告均不得完成；thinking 不外发。审批/问题走既有 interaction 存储；成功和失败均验证进程树清理。Kimi 明确额度耗尽使用 kimi_usage_exhausted，普通 429 为 kimi_nonzero_exit；调度额度故障只升级通知，不自动续作。
+
+配置、版本与验证范围见 [ADR-012](decisions/ADR-012-kimi-executor.md) 和[验证报告](reports/2026-10-28-kimi-validation.md)。本节不扩展原有 ZCode 的历史验证结论。
+
+## Coding Agent Bridge 命名（ADR-013）
+
+展示名为 **Coding Agent Bridge**，MCP server key 为 `coding_agent_bridge`，公开工具使用 `coding_agent_*`（可选 ledger 工具为 `coding_agent_ledger_*`）。旧 `zcode_*` / `ledger_*` 工具名不再注册；升级后刷新 MCP 工具列表并更新调用名。安装 ID、包名、路径、环境变量和已存任务字段保持原值。ZCode 支持模型与 `model.reasoning_level` 选择，档位取自 `coding_agent_model_catalog`；Kimi 支持 `kimi.model` 和可选 `kimi.reasoning_level`，透传原生 thinking，支持值依模型而定；见 [ADR-014](decisions/ADR-014-kimi-reasoning-level.md)。见 [ADR-013](decisions/ADR-013-coding-agent-bridge-discovery.md)。

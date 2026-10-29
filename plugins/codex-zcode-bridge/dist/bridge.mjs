@@ -23721,6 +23721,8 @@ function createWorkerEnv(source) {
     "ZCODE_BRIDGE_BROWSER_USE",
     "ZCODE_BRIDGE_BROWSER_EXECUTABLE",
     "ZCODE_HOME",
+    "KIMI_BRIDGE_EXECUTABLE",
+    "KIMI_CODE_HOME",
     "ZCODE_BUILTIN_PROVIDER_CONFIG_FILE",
     "ZCODE_PERSONAL_PROVIDER_CONFIG_FILE",
     "ZCODE_DATA_BASE_DIR",
@@ -26082,7 +26084,7 @@ var BridgeTaskManager = class _BridgeTaskManager {
       if (!["completed", "failed", "waiting_for_master"].includes(status.status)) {
         throw new TaskManagerError(
           "TASK_STATE",
-          `zcode_continue is not allowed from status ${status.status}`
+          `coding_agent_continue is not allowed from status ${status.status}`
         );
       }
       if (status.cleanup_unverified) throw new TaskManagerError("TASK_STATE", "Cannot continue until unverified ZCode process cleanup is resolved");
@@ -26222,7 +26224,7 @@ var BridgeTaskManager = class _BridgeTaskManager {
       if (isTerminalStatus(status.status)) {
         throw new TaskManagerError(
           "TASK_STATE",
-          `zcode_cancel is not allowed from status ${status.status}`
+          `coding_agent_cancel is not allowed from status ${status.status}`
         );
       }
       const task = this.#store.readTask(taskId);
@@ -26702,14 +26704,20 @@ var TASK_ID_PATTERN2 = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 var taskIdSchema = string2().regex(TASK_ID_PATTERN2, `task_id must match ${TASK_ID_PATTERN2.source}`);
 var stringArray = array(string2());
 var zcodeTaskInputSchema = strictObject({
+  executor: _enum(["zcode", "kimi"]).optional().describe("Local coding executor; defaults to zcode. Select kimi to use Kimi Code CLI."),
+  kimi: strictObject({
+    reasoning_level: string2().trim().min(1).optional().describe("Kimi thinking effort, forwarded as native thinking. K3/K3.1 Pro and standard models currently support low/high/max; support depends on the model. Omit to preserve the native session/default setting. The runtime-reported level is authoritative."),
+    model: string2().trim().min(1).optional().describe("Kimi configured local model alias; omit to use its session/default model."),
+    permission_mode: _enum(["manual", "yolo", "auto"]).optional().describe("Kimi permission mode; defaults to yolo. Pending explicit approvals still require an authorized interaction reply.")
+  }).optional(),
   task_id: taskIdSchema,
   workspace: string2().min(1),
   worktree_path: string2().min(1).optional(),
   model: strictObject({
-    provider_id: string2().trim().min(1),
-    model_id: string2().trim().min(1),
-    reasoning_level: string2().trim().min(1).optional()
-  }).optional(),
+    provider_id: string2().trim().min(1).describe("ZCode provider ID from coding_agent_model_catalog; not a Kimi provider."),
+    model_id: string2().trim().min(1).describe("Exact ZCode model ID from coding_agent_model_catalog."),
+    reasoning_level: string2().trim().min(1).optional().describe("Optional ZCode reasoning level: copy reasoning_levels[].value for this model from coding_agent_model_catalog; supported values vary by model.")
+  }).optional().describe("ZCode-only per-task model and reasoning override; for Kimi use kimi.model instead."),
   timeout_ms: number2().int().min(6e4).max(144e5).optional(),
   objective: string2().min(1),
   requirements: stringArray,
@@ -26718,7 +26726,10 @@ var zcodeTaskInputSchema = strictObject({
   acceptance_criteria: stringArray,
   test_commands: stringArray,
   context: string2().optional()
-}).describe("Full TaskPackage; workspace is the the calling host project root. Optional worktree_path is an existing execution directory selected and prepared by the calling host; the Bridge never creates or selects worktrees. The five array fields must be present (empty allowed), context is optional.");
+}).refine(
+  (task) => task.executor === "kimi" ? task.model === void 0 : task.kimi === void 0,
+  { message: "Kimi tasks use kimi options; ZCode tasks use model" }
+).describe("Full TaskPackage; workspace is the the calling host project root. Optional worktree_path is an existing execution directory selected and prepared by the calling host; the Bridge never creates or selects worktrees. The five array fields must be present (empty allowed), context is optional.");
 var taskIdOnlyInputSchema = strictObject({
   task_id: string2().min(1)
 });
@@ -27270,7 +27281,7 @@ var taskIdSchema2 = string2().trim().min(1);
 var acSchema = object({ id: string2().trim().min(1), text: string2().trim().min(1) });
 function registerLedgerTools(server, options) {
   const link = new LedgerBridgeLink(options.store);
-  server.registerTool("ledger_project_create", {
+  server.registerTool("coding_agent_ledger_project_create", {
     title: "Create a project task ledger project",
     description: "Opt-in project ledger: create a project bound to an explicit absolute workspace. The ledger is independent of Bridge execution state.",
     inputSchema: strictObject({ project_id: string2().trim().min(1).optional(), title: string2().trim().min(1), workspace: string2().trim().min(1) })
@@ -27281,7 +27292,7 @@ function registerLedgerTools(server, options) {
       return mapLedgerError(error2);
     }
   });
-  server.registerTool("ledger_summary", {
+  server.registerTool("coding_agent_ledger_summary", {
     title: "Read the project ledger summary",
     description: "Read-only: task list with statuses, review verdicts, and a coverage note. Task-count ratios are never overall engineering completion.",
     inputSchema: strictObject({ project_id: projectIdSchema })
@@ -27292,7 +27303,7 @@ function registerLedgerTools(server, options) {
       return mapLedgerError(error2);
     }
   });
-  server.registerTool("ledger_task_create", {
+  server.registerTool("coding_agent_ledger_task_create", {
     title: "Create a ledger project task",
     description: "Create a long-lived ProjectTask with numbered acceptance criteria, constraints, dependencies (cycles refused), and an explicit workspace binding.",
     inputSchema: strictObject({
@@ -27312,7 +27323,7 @@ function registerLedgerTools(server, options) {
       return mapLedgerError(error2);
     }
   });
-  server.registerTool("ledger_task_update", {
+  server.registerTool("coding_agent_ledger_task_update", {
     title: "Update a ledger project task definition",
     description: "Update goal/AC/dependencies. A definition change bumps the definition version and invalidates prior approvals.",
     inputSchema: strictObject({
@@ -27332,7 +27343,7 @@ function registerLedgerTools(server, options) {
       return mapLedgerError(error2);
     }
   });
-  server.registerTool("ledger_task_get", {
+  server.registerTool("coding_agent_ledger_task_get", {
     title: "Read one ledger task",
     description: "Read-only task detail: definition, ACs, exemptions, runs, and latest review.",
     inputSchema: strictObject({ task_id: taskIdSchema2 })
@@ -27346,7 +27357,7 @@ function registerLedgerTools(server, options) {
       return mapLedgerError(error2);
     }
   });
-  server.registerTool("ledger_task_history", {
+  server.registerTool("coding_agent_ledger_task_history", {
     title: "Read ledger task history",
     description: "Read-only journal history for one task (change authority).",
     inputSchema: strictObject({ task_id: taskIdSchema2 })
@@ -27357,9 +27368,9 @@ function registerLedgerTools(server, options) {
       return mapLedgerError(error2);
     }
   });
-  server.registerTool("ledger_run_start", {
+  server.registerTool("coding_agent_ledger_run_start", {
     title: "Start a ledger run and dispatch to the Bridge",
-    description: "Persists the run intent with a deterministic executor task id BEFORE dispatching, then calls zcode_task internally. A lost receipt recovers the same execution; retries reuse the same operation_id. executor 'manual' records external work with evidence instead of dispatching.",
+    description: "Persists the run intent with a deterministic executor task id BEFORE dispatching, then calls coding_agent_task internally. A lost receipt recovers the same execution; retries reuse the same operation_id. executor 'manual' records external work with evidence instead of dispatching.",
     inputSchema: strictObject({
       task_id: taskIdSchema2,
       operation_id: string2().trim().min(1).max(100),
@@ -27408,7 +27419,7 @@ function registerLedgerTools(server, options) {
       return mapLedgerError(error2);
     }
   });
-  server.registerTool("ledger_run_link", {
+  server.registerTool("coding_agent_ledger_run_link", {
     title: "Project Bridge evidence onto a ledger run",
     description: "Reads the Bridge task's events and result, projects accepted/started/model-confirmation/finished facts onto the run (idempotent). Never derives the business status: DONE requires the review gate.",
     inputSchema: strictObject({ run_id: string2().trim().min(1) })
@@ -27419,7 +27430,7 @@ function registerLedgerTools(server, options) {
       return mapLedgerError(error2);
     }
   });
-  server.registerTool("ledger_review", {
+  server.registerTool("coding_agent_ledger_review", {
     title: "Record a per-AC review",
     description: "Controlled host entry: records per-acceptance-criterion verdicts with evidence and binds deliverable fingerprints to the current definition version. Rejection returns the task to ready. Worker self-reports cannot call this.",
     inputSchema: strictObject({
@@ -27437,7 +27448,7 @@ function registerLedgerTools(server, options) {
       return mapLedgerError(error2);
     }
   });
-  server.registerTool("ledger_complete", {
+  server.registerTool("coding_agent_ledger_complete", {
     title: "Complete a project task (DONE gate)",
     description: "Controlled host entry: DONE requires a current approved review bound to the current definition version, every AC passed or explicitly exempted, and a delivery receipt for the bound workspace. Refuses otherwise.",
     inputSchema: strictObject({
@@ -27452,7 +27463,7 @@ function registerLedgerTools(server, options) {
       return mapLedgerError(error2);
     }
   });
-  server.registerTool("ledger_reopen", {
+  server.registerTool("coding_agent_ledger_reopen", {
     title: "Reopen a done project task",
     description: "Explicit reopen event with a reason; prior DONE/review history is preserved, never overwritten.",
     inputSchema: strictObject({ task_id: taskIdSchema2, reason: string2().trim().min(1) })
@@ -27490,16 +27501,16 @@ function mapScheduleError(error2) {
   if (error2 instanceof TaskManagerError) return errorResult2(error2.code, error2.message);
   throw error2;
 }
-var SCHEDULE_QUIET_NOTE = "Scheduled goals run quietly: normal progress and a false self-assessment continue the SAME ZCode session without model wakeups; only review requests, blocked interactions, failures, quota exhaustion, unverified cleanup, or a missing self-assessment wake the original chat.";
+var SCHEDULE_QUIET_NOTE = "Scheduled goals run quietly: normal progress and a false self-assessment continue the SAME executor session without model wakeups; only review requests, blocked interactions, failures, quota exhaustion, unverified cleanup, or a missing self-assessment wake the original chat.";
 function registerScheduleTools(server, options) {
   const controller = options.controller;
   const refreshPipe = () => {
     const pipe2 = options.appPipeSource?.();
     if (pipe2) controller.noteAppPipePath(pipe2);
   };
-  server.registerTool("zcode_schedule", {
-    title: "Schedule one ZCode goal for autonomous execution",
-    description: `Submit one bounded goal to start at an absolute time (ISO datetime WITH timezone) on this Linux host, supervised by the user's systemd manager. task_id is the schedule key: an identical resubmission replays the schedule receipt; a different request with the same id returns SCHEDULE_CONFLICT. thread_id MUST be the UUID of the current original Codex chat, captured from host context (for example CODEX_THREAD_ID when the host provides it) \u2014 never guessed from unrelated environment. The scheduled prompt additionally requires the agent's boolean acceptance_met self-assessment: false continues the same session quietly, true wakes thread_id for independent review, and a missing/invalid assessment wakes it with uncertainty. Requires user-level systemd; a missing supervisor or App pipe fails visibly for scheduling only while the ordinary tools keep working. ${SCHEDULE_QUIET_NOTE}`,
+  server.registerTool("coding_agent_schedule", {
+    title: "Schedule a ZCode or Kimi goal and wake the original Codex chat",
+    description: `task uses the same executor/model options as coding_agent_task: omit executor for ZCode, or set task.executor="kimi" with task.kimi.model and optional task.kimi.reasoning_level (model-supported effort, currently low/high/max for K3/K3.1 Pro and standard models); its full scheduled wakeup chain remains unverified. Submit one bounded goal to start at an absolute time (ISO datetime WITH timezone) on this Linux host, supervised by the user's systemd manager. task_id is the schedule key: an identical resubmission replays the schedule receipt; a different request with the same id returns SCHEDULE_CONFLICT. thread_id MUST be the UUID of the current original Codex chat, captured from host context (for example CODEX_THREAD_ID when the host provides it) \u2014 never guessed from unrelated environment. The scheduled prompt additionally requires the agent's boolean acceptance_met self-assessment: false continues the same session quietly, true wakes thread_id for independent review, and a missing/invalid assessment wakes it with uncertainty. Requires user-level systemd; a missing supervisor or App pipe fails visibly for scheduling only while the ordinary tools keep working. ${SCHEDULE_QUIET_NOTE}`,
     inputSchema: zcodeScheduleInputSchema,
     outputSchema: scheduleReceiptSchema
   }, async (args) => {
@@ -27511,7 +27522,7 @@ function registerScheduleTools(server, options) {
       return mapScheduleError(error2);
     }
   });
-  server.registerTool("zcode_schedule_status", {
+  server.registerTool("coding_agent_schedule_status", {
     title: "Read scheduled goal status",
     description: `Read one schedule's goal state (scheduled/dispatched/awaiting_review/accepted/cancelled/failed), the live Bridge execution state for its task, any attention reason, the pending review window, and wakeup delivery states. Execution status and goal review are reported separately; a sent wakeup is never task acceptance. ${SCHEDULE_QUIET_NOTE}`,
     inputSchema: zcodeScheduleStatusInputSchema,
@@ -27524,9 +27535,9 @@ function registerScheduleTools(server, options) {
       return mapScheduleError(error2);
     }
   });
-  server.registerTool("zcode_schedule_review", {
+  server.registerTool("coding_agent_schedule_review", {
     title: "Record the independent review verdict for a scheduled goal",
-    description: `After zcode_schedule_status shows awaiting_review, verify the work independently, then record the verdict for exactly that attempt. accepted=true ends the goal. accepted=false REQUIRES concrete feedback and resumes the SAME ZCode session through a stable continuation; address every feedback point. Stale attempts, cancelled goals, and conflicting verdicts are rejected; retrying the identical verdict replays the recorded outcome.`,
+    description: `After coding_agent_schedule_status shows awaiting_review, verify the work independently, then record the verdict for exactly that attempt. accepted=true ends the goal. accepted=false REQUIRES concrete feedback and resumes the SAME executor session through a stable continuation; address every feedback point. Stale attempts, cancelled goals, and conflicting verdicts are rejected; retrying the identical verdict replays the recorded outcome.`,
     inputSchema: zcodeScheduleReviewInputSchema,
     outputSchema: scheduleReviewResultSchema
   }, async (args) => {
@@ -27537,7 +27548,7 @@ function registerScheduleTools(server, options) {
       return mapScheduleError(error2);
     }
   });
-  server.registerTool("zcode_schedule_cancel", {
+  server.registerTool("coding_agent_schedule_cancel", {
     title: "Cancel a scheduled goal",
     description: "Cancel one scheduled goal: the stop intent is persisted FIRST (blocking any further automatic continuation), then any existing task is cancelled through the verified process-tree path. Idempotent; cancelling an accepted goal is rejected. Obsolete undelivered wakeup events are superseded.",
     inputSchema: zcodeScheduleCancelInputSchema,
@@ -27639,9 +27650,9 @@ function formatDuration(durationMs2) {
 }
 
 // src/mcp/server.ts
-var SERVER_NAME = "codex-zcode-bridge";
+var SERVER_NAME = "coding-agent-bridge";
 var SERVER_VERSION = "1.2.7"; // x-release-please-version
-var EXECUTION_NOT_VERDICT = "Results describe Bridge/ZCode execution only: status 'completed' means the invocation and report normalization finished, NOT that the calling host accepted the work. the calling host must independently review the workspace diff and checks before deciding PASS.";
+var EXECUTION_NOT_VERDICT = "Results describe Bridge/executor execution only: status 'completed' means the invocation and report normalization finished, NOT that the calling host accepted the work. the calling host must independently review the workspace diff and checks before deciding PASS.";
 function okResult3(data) {
   return {
     content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
@@ -27676,11 +27687,16 @@ async function runTool(operation) {
 function createBridgeServer(options) {
   const manager = options.taskManager;
   const serverInfo = options.serverInfo ?? { name: SERVER_NAME, version: SERVER_VERSION };
-  const server = new McpServer(serverInfo, options.instructions ? { instructions: options.instructions } : void 0);
+  const instructions = options.instructions ?? [
+    "Coding Agent Bridge delegates authorized coding work to local ZCode (default) or Kimi Code. Use coding_agent_task for immediate asynchronous execution; ordinary tasks require monitoring and do not wake the chat automatically. Follow coding_agent_events for live output and interactions, coding_agent_status for state, coding_agent_feedback for a concise summary, and coding_agent_result for the final report. Use coding_agent_continue with concrete feedback to reuse the same task, executor and session; use coding_agent_cancel to stop ordinary tasks. completed is execution completion, not independent acceptance.",
+    'For ZCode, first call coding_agent_model_catalog and use its exact provider_id/model_id and reasoning_levels[].value in model: { provider_id, model_id, reasoning_level? }. Default-model tools affect future ZCode tasks only; doctor is ZCode-only. For Kimi, set executor="kimi" and optionally kimi: { model: <configured local alias>, reasoning_level?: <model-supported effort>, permission_mode: <manual|yolo|auto> }; default mode is yolo. Kimi reasoning_level is forwarded as native thinking; K3/K3.1 Pro and standard models currently support low/high/max, while support varies by model. Omit it to preserve native settings. Kimi model discovery is not exposed. Never infer approval from yolo; answer pending interactions only within user authorization. Stop automatic retries on quota exhaustion or unverified cleanup.',
+    ...options.schedule ? ["Use coding_agent_schedule for a one-time goal on Linux with user systemd and a configured Codex App pipe: the executor starts at start_at, continues quietly in the same session until its self-assessment says ready, then wakes the original thread_id for independent Codex review. Use coding_agent_schedule_status, coding_agent_schedule_review and coding_agent_schedule_cancel for scheduled goals. Notify the human only on accepted work or a required decision. This is not a recurring schedule; Kimi's full scheduled wakeup chain remains unverified."] : []
+  ].join("\n");
+  const server = new McpServer(serverInfo, { instructions });
   server.registerTool(
-    "zcode_doctor",
+    "coding_agent_doctor",
     {
-      title: "Check ZCode Bridge setup",
+      title: "Diagnose ZCode setup (ZCode only)",
       description: "Run read-only checks for Bridge prerequisites, ZCode runtime/provider configuration, execution mode, task storage, and Desktop task-index availability. It does not start a ZCode session. App-server model availability and real permission approval are reported as unverified until a task runs.",
       inputSchema: {},
       outputSchema: doctorReportSchema
@@ -27691,10 +27707,10 @@ function createBridgeServer(options) {
     }
   );
   server.registerTool(
-    "zcode_model_catalog",
+    "coding_agent_model_catalog",
     {
-      title: "Read available ZCode models",
-      description: "Read models and reasoning levels for this workspace. The Bridge caches the catalog for 24 hours, refreshes when provider settings change or the cache expires, and re-reads provider config before retrying a failed refresh. A cache response has current_model=null; use provider_id/model_id from models in zcode_task.model.",
+      title: "List ZCode models and supported reasoning levels (ZCode only)",
+      description: "Read models and reasoning levels for this workspace. The Bridge caches the catalog for 24 hours, refreshes when provider settings change or the cache expires, and re-reads provider config before retrying a failed refresh. A cache response has current_model=null; use provider_id/model_id from models in coding_agent_task.model, and reasoning_levels[].value as model.reasoning_level. Supported levels depend on the model; do not guess. This catalog does not list Kimi models.",
       inputSchema: zcodeModelCatalogInputSchema,
       outputSchema: modelCatalogSchema
     },
@@ -27704,10 +27720,10 @@ function createBridgeServer(options) {
     }
   );
   server.registerTool(
-    "zcode_default_model",
+    "coding_agent_default_model",
     {
-      title: "Read the Bridge default model",
-      description: "Read the provider, model, and optional reasoning level used when zcode_task has no model override.",
+      title: "Read the default ZCode model and reasoning level (ZCode only)",
+      description: "Read the provider, model, and optional reasoning level used when coding_agent_task has no model override.",
       inputSchema: {},
       outputSchema: defaultModelSchema
     },
@@ -27717,10 +27733,10 @@ function createBridgeServer(options) {
     }
   );
   server.registerTool(
-    "zcode_set_default_model",
+    "coding_agent_set_default_model",
     {
-      title: "Set the Bridge default model",
-      description: "Persist a default provider/model selection for future tasks that omit zcode_task.model. Use IDs from zcode_model_catalog or the configured ZCode provider/model rules; the app-server validates the selection when a task starts. An optional reasoning_level applies to the configured default model; a per-task model selection can still override it.",
+      title: "Set the default ZCode model and reasoning level (ZCode only)",
+      description: "Persist a default provider/model selection for future tasks that omit coding_agent_task.model. Use IDs from coding_agent_model_catalog or the configured ZCode provider/model rules; the app-server validates the selection when a task starts. An optional reasoning_level applies to the configured default model; a per-task model selection can still override it.",
       inputSchema: zcodeDefaultModelInputSchema,
       outputSchema: defaultModelSchema
     },
@@ -27730,10 +27746,10 @@ function createBridgeServer(options) {
     }
   );
   server.registerTool(
-    "zcode_clear_default_model",
+    "coding_agent_clear_default_model",
     {
-      title: "Clear the Bridge default model",
-      description: "Remove the Bridge default model so future tasks without zcode_task.model use the ZCode session default.",
+      title: "Clear the default ZCode model (ZCode only)",
+      description: "Remove the Bridge default model so future tasks without coding_agent_task.model use the ZCode session default.",
       inputSchema: {},
       outputSchema: defaultModelSchema
     },
@@ -27743,19 +27759,19 @@ function createBridgeServer(options) {
     }
   );
   server.registerTool(
-    "zcode_task",
+    "coding_agent_task",
     {
-      title: "Submit one ZCode coding task",
-      description: `Create a bounded coding task for the local ZCode subordinate agent. workspace is the the calling host project root and determines the ZCode Desktop project identity. the calling host decides whether to create a worktree; if it does, pass its existing absolute directory as optional worktree_path. The Bridge never creates, selects, or removes a worktree. Without worktree_path, ZCode runs directly in workspace. Optional model selects a ZCode provider_id/model_id for this session without changing the project default. Returns a TaskReceipt; the task runs asynchronously in a detached worker. ${EXECUTION_NOT_VERDICT}`,
+      title: "Submit one ZCode or Kimi coding task",
+      description: `Create a bounded coding task. Set executor="kimi" for Kimi Code (kimi.model is its local model alias; kimi.permission_mode defaults to yolo); omit executor for ZCode. All coding_agent_* task lifecycle tools also work with Kimi tasks; ZCode doctor/model tools remain ZCode-only. workspace is the the calling host project root and determines the ZCode Desktop project identity. the calling host decides whether to create a worktree; if it does, pass its existing absolute directory as optional worktree_path. The Bridge never creates, selects, or removes a worktree. Without worktree_path, ZCode runs directly in workspace. For ZCode, call coding_agent_model_catalog first, then pass model: { provider_id, model_id, reasoning_level? }; use exact reasoning_levels[].value, not a guessed level. This per-task override does not change the project default. Kimi supports kimi.model and optional kimi.reasoning_level (native thinking); K3/K3.1 Pro and standard models currently support low/high/max. Model support varies; omitted reasoning_level preserves native settings. Confirm the actual level from runtime events. timeout_ms defaults to 60 minutes and allows 60 seconds to 4 hours per attempt. Ordinary tasks do not send completion wakeups; use coding_agent_schedule when a scheduled original-chat wakeup is required and supported. Returns a TaskReceipt; the task runs asynchronously in a detached worker. ${EXECUTION_NOT_VERDICT}`,
       inputSchema: zcodeTaskInputSchema,
       outputSchema: taskReceiptSchema
     },
     async (args) => runTool(() => manager.createTask(args))
   );
   server.registerTool(
-    "zcode_status",
+    "coding_agent_status",
     {
-      title: "Read ZCode task execution status",
+      title: "Read ZCode or Kimi task execution status",
       description: `Read the execution status record for one task. This is execution status only and never contains a PASS/FAIL code-review judgment. ${EXECUTION_NOT_VERDICT}`,
       inputSchema: taskIdOnlyInputSchema,
       outputSchema: taskStatusRecordSchema
@@ -27763,10 +27779,10 @@ function createBridgeServer(options) {
     async (args) => runTool(() => manager.getStatus(args.task_id))
   );
   server.registerTool(
-    "zcode_feedback",
+    "coding_agent_feedback",
     {
-      title: "Read concise ZCode task feedback",
-      description: `Read a provenance-aware v0.1 snapshot for one task attempt. Bridge status, runtime-reported model/tool observations, and Agent-reported result claims remain distinct. phase/progress stay null; interaction remains not_observed without reliable current evidence. This snapshot does not replace zcode_events and does not verify or accept the result. ${EXECUTION_NOT_VERDICT}`,
+      title: "Read a concise ZCode or Kimi task summary",
+      description: `Read a provenance-aware v0.1 snapshot for one task attempt. Bridge status, runtime-reported model/tool observations, and Agent-reported result claims remain distinct. phase/progress stay null; interaction remains not_observed without reliable current evidence. This snapshot does not replace coding_agent_events and does not verify or accept the result. ${EXECUTION_NOT_VERDICT}`,
       inputSchema: zcodeFeedbackInputSchema,
       outputSchema: taskFeedbackSnapshotV01Schema
     },
@@ -27784,10 +27800,10 @@ function createBridgeServer(options) {
     }
   );
   server.registerTool(
-    "zcode_events",
+    "coding_agent_events",
     {
-      title: "Read live ZCode execution events",
-      description: "Read persisted progress events for a task. Set view to summary to merge adjacent model text chunks; raw is the default. next_seq advances across all scanned events, including merged chunks. Immediately after submission, report the project path, effective execution path (and worktree path when supplied), and queued/running state from the first events. Keep polling until turn_started or startup failure; before longer monitoring, report the ZCode session, runtime-reported selected model, runtime-reported reasoning level when present, and execution mode. Set after_seq to the last next_seq returned and wait_ms up to 25000. Hidden reasoning is excluded. interaction_requested events include bounded tool/request details needed for a deliberate permission or input decision.",
+      title: "Follow live ZCode or Kimi output and interactions",
+      description: "Read persisted progress events for a task. Set view to summary to merge adjacent model text chunks; raw is the default. next_seq advances across all scanned events, including merged chunks. Immediately after submission, report the project path, effective execution path (and worktree path when supplied), and queued/running state from the first events. Keep polling until turn_started or startup failure; before longer monitoring, report the executor session, runtime-reported selected model, runtime-reported reasoning level when present, and execution mode. Set after_seq to the last next_seq returned and wait_ms up to 25000. Hidden reasoning is excluded. interaction_requested events include bounded tool/request details needed for a deliberate permission or input decision.",
       inputSchema: zcodeEventsInputSchema,
       outputSchema: taskProgressPageSchema
     },
@@ -27797,10 +27813,10 @@ function createBridgeServer(options) {
     }
   );
   server.registerTool(
-    "zcode_interaction_reply",
+    "coding_agent_interaction_reply",
     {
-      title: "Reply to a ZCode permission or input request",
-      description: "Reply to a pending ZCode permission or user-input request surfaced by zcode_events. For permission requests, use allow only when the user explicitly authorized the requested action; otherwise deny or ask the user. Do not infer permission from task instructions, worktree use, or ZCode mode. For user-input requests, answer only from known facts or the user's explicit direction. This tool does not approve the task result.",
+      title: "Answer a ZCode or Kimi permission or input request",
+      description: "Reply to a pending ZCode or Kimi permission or user-input request surfaced by coding_agent_events. For permission requests, use allow only when the user explicitly authorized the requested action; otherwise deny or ask the user. Do not infer permission from task instructions, worktree use, or executor mode. For user-input requests, answer only from known facts or the user's explicit direction. This tool does not approve the task result.",
       inputSchema: zcodeInteractionReplyInputSchema
     },
     async (args) => {
@@ -27809,9 +27825,9 @@ function createBridgeServer(options) {
     }
   );
   server.registerTool(
-    "zcode_result",
+    "coding_agent_result",
     {
-      title: "Read the terminal ZCode task result",
+      title: "Read the final ZCode or Kimi report",
       description: `Read the persisted TaskResult for a finished task. Returns TASK_NOT_FINISHED before a terminal state. 'completed' is not a the calling host PASS: files_changed, tests, and decisions are normalized claims from the subordinate report and must be verified independently. ${EXECUTION_NOT_VERDICT}`,
       inputSchema: taskIdOnlyInputSchema,
       outputSchema: taskResultSchema
@@ -27819,19 +27835,19 @@ function createBridgeServer(options) {
     async (args) => runTool(() => manager.getResult(args.task_id))
   );
   server.registerTool(
-    "zcode_continue",
+    "coding_agent_continue",
     {
-      title: "Continue a ZCode task with master feedback",
-      description: `Continue a finished task with master feedback: reuses the task ID and workspace, increments the attempt, and preserves prior evidence. Allowed from completed, failed, or waiting_for_master. Supply a stable operation_id when retrying after a lost response; the same ID and input will not create another attempt. A decision flagged by ZCode is never auto-approved; the calling host must provide the follow-up instruction. ${EXECUTION_NOT_VERDICT}`,
+      title: "Continue the same ZCode or Kimi session with feedback",
+      description: `Continue a finished task with master feedback: reuses the task ID and workspace, increments the attempt, and preserves prior evidence. Allowed from completed, failed, or waiting_for_master. Supply a stable operation_id when retrying after a lost response; the same ID and input will not create another attempt. The executor and original session are preserved. A decision flagged by the executor is never auto-approved; the calling host must provide the follow-up instruction. ${EXECUTION_NOT_VERDICT}`,
       inputSchema: zcodeContinueInputSchema,
       outputSchema: taskReceiptSchema
     },
     async (args) => runTool(() => manager.continueTask(args))
   );
   server.registerTool(
-    "zcode_cancel",
+    "coding_agent_cancel",
     {
-      title: "Cancel a queued or running ZCode task",
+      title: "Cancel a queued or running ZCode or Kimi task",
       description: `Cancel a queued or running task. Running cancellation returns only after the worker process tree termination is confirmed. ${EXECUTION_NOT_VERDICT}`,
       inputSchema: taskIdOnlyInputSchema,
       outputSchema: taskStatusRecordSchema
@@ -27845,7 +27861,7 @@ function createBridgeServer(options) {
     registerScheduleTools(server, options.schedule);
   }
   if (options.enableExperiments) server.registerTool(
-    "zcode_progress_probe",
+    "coding_agent_progress_probe",
     {
       title: "[Experiment] Check MCP progress display",
       description: "Temporary read-only experiment. Sends three MCP progress notifications over three seconds to test whether the calling host displays server progress while this tool runs. Does not start or modify a ZCode task."
@@ -28298,7 +28314,7 @@ var ZCodeModelSettings = class {
       } catch (error2) {
         const reason2 = error2 instanceof Error ? error2.message : String(error2);
         const code2 = error2 instanceof BridgeError ? error2.code : "provider_config_invalid";
-        throw new BridgeError(code2, `Could not load the ZCode runtime/provider configuration after retrying: ${reason2}. Run zcode_doctor for the failing path, correct it, then call zcode_model_catalog again.`, { cause: error2 });
+        throw new BridgeError(code2, `Could not load the ZCode runtime/provider configuration after retrying: ${reason2}. Run coding_agent_doctor for the failing path, correct it, then call coding_agent_model_catalog again.`, { cause: error2 });
       }
     }
     const cached2 = await readModelCatalogCache(source.cachePath);
@@ -28324,7 +28340,7 @@ var ZCodeModelSettings = class {
     }
     const reason = lastError instanceof Error ? lastError.message : String(lastError);
     const code = lastError instanceof BridgeError ? lastError.code : "zcode_nonzero_exit";
-    throw new BridgeError(code, `Model catalog refresh failed after re-reading provider config and retrying: ${reason}. Run zcode_doctor to identify a missing or invalid runtime/provider file; after correcting it, call zcode_model_catalog again.`, { cause: lastError });
+    throw new BridgeError(code, `Model catalog refresh failed after re-reading provider config and retrying: ${reason}. Run coding_agent_doctor to identify a missing or invalid runtime/provider file; after correcting it, call coding_agent_model_catalog again.`, { cause: lastError });
   }
   async #resolveCatalogSource(workspacePath) {
     const runtimeEnv = loadPersistedRuntimeEnvironment(this.#sourceEnv, this.#homeDir, this.#host);
@@ -28763,11 +28779,11 @@ var REASON_HEADLINES = {
 function buildNotificationMessage(input) {
   const lines = [
     `Event ID: ${JSON.stringify(input.eventId)}`,
-    `[ZCode Bridge schedule] task "${input.taskId}" attempt ${String(input.attempt)}: ${REASON_HEADLINES[input.reason]}.`,
+    `[Coding Agent Bridge schedule] task "${input.taskId}" attempt ${String(input.attempt)}: ${REASON_HEADLINES[input.reason]}.`,
     "This is a scheduler wakeup, not task acceptance; execution status and goal review are separate.",
-    `- Inspect the authoritative state yourself with zcode_schedule_status (task_id "${input.taskId}"), then zcode_status / zcode_result / zcode_events on the task.`,
-    "- If the agent self-assessed acceptance_met=true: independently verify the work, then call zcode_schedule_review with accepted=true, or accepted=false plus concrete feedback to resume the SAME ZCode session.",
-    "- For a pending permission or input request: decide with the user and reply via zcode_interaction_reply using the exact request_id; the scheduler never auto-approves.",
+    `- Inspect the authoritative state yourself with coding_agent_schedule_status (task_id "${input.taskId}"), then coding_agent_status / coding_agent_result / coding_agent_events on the task.`,
+    "- If the agent self-assessed acceptance_met=true: independently verify the work, then call coding_agent_schedule_review with accepted=true, or accepted=false plus concrete feedback to resume the SAME executor session.",
+    "- For a pending permission or input request: decide with the user and reply via coding_agent_interaction_reply using the exact request_id; the scheduler never auto-approves.",
     "- If provider quota is exhausted or cleanup is unverified: stop, inform the user, and do not auto-retry or continue.",
     "- Notify the human only when you accept the outcome or a human decision is required."
   ];
@@ -29087,7 +29103,7 @@ var ScheduleController = class {
     });
   }
   /** Terminal attempt with acceptance_met=true: wake the original thread for
-   * independent review; the goal now waits for zcode_schedule_review. */
+   * independent review; the goal now waits for coding_agent_schedule_review. */
   async requestReview(taskId, attempt) {
     await this.#locked(taskId, async (state, spec) => {
       if (state.cancel_requested || state.status === "cancelled" || state.status === "accepted" || state.status === "failed") return;
@@ -29636,7 +29652,7 @@ async function startBridge(host = codexHostProfile(), version2 = SERVER_VERSION)
     taskManager: manager,
     doctor: () => runBridgeDoctor({ env: runtimeEnv, dataRoot, resolver: { host } }),
     modelSettings,
-    serverInfo: { name: host.name, version: version2 },
+    serverInfo: { name: host.name === codexHostProfile().name ? SERVER_NAME : host.name, version: version2 },
     instructions: host.instructions,
     schedule: scheduleController ? {
       controller: scheduleController,

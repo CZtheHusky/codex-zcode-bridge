@@ -1,4 +1,6 @@
-# Codex → ZCode Bridge
+# Coding Agent Bridge
+
+**Coding Agent Bridge** runs local ZCode or Kimi coding tasks in the background. MCP tools use `coding_agent_*` under `coding_agent_bridge`. Select ZCode models and reasoning levels via `coding_agent_model_catalog` and `model.reasoning_level`; Kimi uses `kimi.model` and optional `kimi.reasoning_level` (native thinking; currently low/high/max for K3/K3.1 Pro and standard models, depending on model support). Omit the level to preserve native settings. Monitor, continue, answer interactions and cancel tasks. One-time scheduled goals can wake the original Codex chat on supported Linux/App setups; ordinary tasks do not send completion wakeups. Refresh the MCP tool list after upgrading: old `zcode_*` names are no longer registered. Installation IDs, paths, environment variables and stored task data retain their existing names.
 
 > Status: AUTHORITATIVE
 > Last updated: 2026-10-28
@@ -21,13 +23,38 @@ Delegate coding tasks from Codex to your local ZCode Agent. Codex assigns tasks,
 
 ---
 
+## Kimi Code support
+
+The same bridge can run local **Kimi Code CLI 2.3.3** tasks. Install and log in to Kimi first. Submit `coding_agent_task` with `executor: "kimi"`; omit it to keep using ZCode. Existing status, events, feedback, result, continue, cancel, interaction reply and schedule tools work for both executors.
+
+```json
+{
+  "task_id": "kimi-example",
+  "executor": "kimi",
+  "workspace": "/absolute/project/path",
+  "kimi": { "permission_mode": "yolo" },
+  "objective": "Implement the requested change and report the checks",
+  "requirements": [],
+  "allowed_paths": [],
+  "forbidden_paths": [],
+  "acceptance_criteria": [],
+  "test_commands": []
+}
+```
+
+`kimi.model` optionally selects an existing Kimi model alias; otherwise the session model or local Kimi default is used. `kimi.permission_mode` accepts `manual`, `yolo` (default), or `auto`. Pending approvals/questions still go through `coding_agent_interaction_reply`; the bridge never approves them automatically. Do not combine Kimi options with the ZCode `model` field. ZCode doctor/catalog/default-model tools remain ZCode-only.
+
+The worker starts its own authenticated loopback `kimi web --no-open` process and resumes the same persisted Kimi session on continuation. Set `KIMI_BRIDGE_EXECUTABLE` if `kimi` is absent from PATH; a CLI `.mjs`/`.cjs`/`.js` entry is also supported. `KIMI_CODE_HOME` selects Kimi's configuration, login and session directory. These two variables pass to detached workers and scheduled runners; arbitrary API-key environment variables do not. Kimi currently requires Node 22.19 or newer; the Bridge's existing ZCode requirement is unchanged.
+
+The Kimi Server API is experimental. Compatibility is verified against 2.3.3; other versions and platforms require validation. Explicit quota exhaustion produces `kimi_usage_exhausted` and stops automatic continuation; an ordinary HTTP 429 is not treated as exhausted quota. See [ADR-012](docs/decisions/ADR-012-kimi-executor.md) and the [validation report](docs/reports/2026-10-28-kimi-validation.md).
+
 ## How it works
 
 ```text
 You
  │  "Implement this feature."
  ▼
-Codex ── delegates task ──▶ Codex → ZCode Bridge ── starts / monitors ──▶ ZCode Agent
+Codex ── delegates task ──▶ Coding Agent Bridge ── starts / monitors ──▶ ZCode Agent
  ▲                                                                           │
  └──────────── reviews diff, verifies, accepts or continues ◀── reports ─────┘
 ```
@@ -60,9 +87,9 @@ Codex can delegate the task, monitor execution, inspect the resulting changes, v
 - Read the live ZCode model catalog and reasoning levels, select a provider/model per task, and get/set/clear a Bridge default model.
 - At startup, report the project directory, execution directory, ZCode session, runtime-reported model and reasoning level, and execution mode.
 - Group ZCode Desktop tasks under the Codex project directory; index sync failures do not stop task execution.
-- Unified task observation (`zcode_status.observation`, `zcode_events.observation`): worker/runtime liveness with OS process-identity probing (PID-reuse safe), activity/waiting/stalled hints, result/cleanup state — advisory only, `unknown` never means dead.
-- Bounded, resumable event scans (`zcode_events` with `scan_cursor`/`max_bytes`): complete-line parsing, corruption counters, byte-budgeted reads near the log cap.
-- Per-attempt usage/model/timing evidence in `zcode_result` (`usage`, `model`, `timing`): runtime-reported token numbers only — missing stays "not reported", totals are never recomputed.
+- Unified task observation (`coding_agent_status.observation`, `coding_agent_events.observation`): worker/runtime liveness with OS process-identity probing (PID-reuse safe), activity/waiting/stalled hints, result/cleanup state — advisory only, `unknown` never means dead.
+- Bounded, resumable event scans (`coding_agent_events` with `scan_cursor`/`max_bytes`): complete-line parsing, corruption counters, byte-budgeted reads near the log cap.
+- Per-attempt usage/model/timing evidence in `coding_agent_result` (`usage`, `model`, `timing`): runtime-reported token numbers only — missing stays "not reported", totals are never recomputed.
 - Large approval inputs (ADR-008): tool-permission params persist completely up to 1 MiB (measured on the compact `JSON.stringify(params)` serialization); requests over the 64,000-byte single-event line are published as an explicitly-marked preview with a private full-request reference (path, byte count, SHA256). Approvals verify the record's bytes/SHA256 under the interaction lock; a record that went missing, corrupt, or edited mid-wait is declined explicitly instead of executing.
 - Session frames (ADR-008): newline-delimited JSON-RPC frames are consumed one at a time with a 16 MiB raw-frame UTF-8 limit; a fatal frame error latches its reason, ends pending RPCs and the turn, and blocks further requests instead of surfacing as a timeout.
 - Optional project task ledger (`ledger_*` tools, opt-in only): long-lived project tasks, runs, per-AC reviews, and a controlled DONE gate that a worker report alone can never satisfy.
@@ -82,7 +109,7 @@ codex plugin add codex-zcode-bridge@codex-zcode-bridge
 
 ### Install in the Codex desktop app
 
-First run the marketplace-add command above to register the GitHub marketplace. Then open Codex's **Plugins Directory**, choose that marketplace, and install **Zcode Bridge**.
+First run the marketplace-add command above to register the GitHub marketplace. Then open Codex's **Plugins Directory**, choose that marketplace, and install **Coding Agent Bridge**.
 
 ### First run
 
@@ -115,23 +142,23 @@ After execution, Codex should inspect the actual diff and run acceptance checks 
 
 In ZCode Desktop, find tasks in the Workspace view under the Codex project directory.
 
-For installation or startup problems, call the `zcode_doctor` MCP tool for setup diagnostics. It does not start a ZCode session. Use `zcode_model_catalog` to read the cached or live app-server model list; a real permission-approval roundtrip still requires an actual task.
+For installation or startup problems, call the `coding_agent_doctor` MCP tool for setup diagnostics. It does not start a ZCode session. Use `coding_agent_model_catalog` to read the cached or live app-server model list; a real permission-approval roundtrip still requires an actual task.
 
-Use `zcode_model_catalog` with the current project path to read app-server model IDs and reasoning levels. Pass a selected `provider_id`/`model_id` in `zcode_task.model` for one task. Use `zcode_set_default_model` to configure the default for future tasks, `zcode_default_model` to read it, and `zcode_clear_default_model` to return to the ZCode session default. The catalog is cached for one day; provider config changes invalidate it. On a cache miss, the Bridge creates and closes a deferred session without sending a prompt. If a refresh fails, it re-reads provider config and retries once. A persistent failure reports an error with a `zcode_doctor` diagnostic step and never returns an expired catalog.
+Use `coding_agent_model_catalog` with the current project path to read app-server model IDs and reasoning levels. Pass a selected `provider_id`/`model_id` in `coding_agent_task.model` for one task. Use `coding_agent_set_default_model` to configure the default for future tasks, `coding_agent_default_model` to read it, and `coding_agent_clear_default_model` to return to the ZCode session default. The catalog is cached for one day; provider config changes invalidate it. On a cache miss, the Bridge creates and closes a deferred session without sending a prompt. If a refresh fails, it re-reads provider config and retries once. A persistent failure reports an error with a `coding_agent_doctor` diagnostic step and never returns an expired catalog.
 
-If a `zcode_task` call times out or loses its response, query or retry with the same `task_id`; identical submissions replay the original receipt and changed content is rejected. For retryable `zcode_continue` calls, supply a stable `operation_id` so a lost response cannot increment the attempt twice.
+If a `coding_agent_task` call times out or loses its response, query or retry with the same `task_id`; identical submissions replay the original receipt and changed content is rejected. For retryable `coding_agent_continue` calls, supply a stable `operation_id` so a lost response cannot increment the attempt twice.
 
 ### Scheduled goals (experimental, Linux)
 
-Ask Codex to start one bounded goal at a specific date, time, and timezone, continue quietly until its acceptance criteria are met, and return to the current chat for independent review. The default Codex stdio host exposes `zcode_schedule`, `zcode_schedule_status`, `zcode_schedule_review`, and `zcode_schedule_cancel` in addition to the 13 core tools. Other hosts must explicitly compose the scheduler.
+Ask Codex to start one bounded goal at a specific date, time, and timezone, continue quietly until its acceptance criteria are met, and return to the current chat for independent review. The default Codex stdio host exposes `coding_agent_schedule`, `coding_agent_schedule_status`, `coding_agent_schedule_review`, and `coding_agent_schedule_cancel` in addition to the 13 core tools. Other hosts must explicitly compose the scheduler.
 
-`zcode_schedule` takes a complete `task`, an ISO 8601 `start_at` with `Z` or an explicit offset, and the original local Codex chat's `thread_id`. Codex must obtain that UUID from the current host context under the user's authorization. One `task_id` identifies one scheduled goal; an identical retry reuses it, and conflicting submissions fail. This is one delayed start followed by continued work, with no recurring creation of new tasks.
+`coding_agent_schedule` takes a complete `task`, an ISO 8601 `start_at` with `Z` or an explicit offset, and the original local Codex chat's `thread_id`. Codex must obtain that UUID from the current host context under the user's authorization. One `task_id` identifies one scheduled goal; an identical retry reuses it, and conflicting submissions fail. This is one delayed start followed by continued work, with no recurring creation of new tasks.
 
 The scheduler requires an available Linux user systemd manager, `systemd-run` with `--expand-environment=no` support (systemd 254 or newer), and a Codex App tools pipe. It records the supervisor unit and log path, waits until the start time, and resumes from persisted state after a runner crash. It does not enable linger or promise operation across logout, shutdown, or App closure. Missing scheduling support does not disable the ordinary task tools.
 
-Only scheduled prompts require the optional boolean `acceptance_met`. A completed attempt with `false` continues the same task and ZCode session quietly; `true` wakes the bound chat for independent inspection and acceptance checks. Codex then calls `zcode_schedule_review` with the current `attempt` and either `accepted: true`, or `accepted: false` plus concrete feedback to continue that session. A self-assessment, `completed`, or successful wakeup delivery alone never means acceptance. Normal progress and rejected reviews stay quiet for the human; notify them when Codex accepts the work or a critical issue requires attention.
+Only scheduled prompts require the optional boolean `acceptance_met`. A completed attempt with `false` continues the same task and ZCode session quietly; `true` wakes the bound chat for independent inspection and acceptance checks. Codex then calls `coding_agent_schedule_review` with the current `attempt` and either `accepted: true`, or `accepted: false` plus concrete feedback to continue that session. A self-assessment, `completed`, or successful wakeup delivery alone never means acceptance. Normal progress and rejected reviews stay quiet for the human; notify them when Codex accepts the work or a critical issue requires attention.
 
-Missing or invalid self-assessment, decisions, pending permission/input requests, failures, quota exhaustion, or unverified cleanup wake Codex for judgment. Permissions are never auto-approved. A timeout can resume automatically only with a saved session and verified cleanup; quota exhaustion never triggers automatic continuation. Cancel through `zcode_schedule_cancel` so the persisted stop intent blocks future automatic work before task cleanup. If the MCP caller disappears, the runner resumes that cancellation; unverified cleanup stops cancellation retries and wakes Codex with `cancel_failed` for a decision.
+Missing or invalid self-assessment, decisions, pending permission/input requests, failures, quota exhaustion, or unverified cleanup wake Codex for judgment. Permissions are never auto-approved. A timeout can resume automatically only with a saved session and verified cleanup; quota exhaustion never triggers automatic continuation. Cancel through `coding_agent_schedule_cancel` so the persisted stop intent blocks future automatic work before task cleanup. If the MCP caller disappears, the runner resumes that cancellation; unverified cleanup stops cancellation retries and wakes Codex with `cancel_failed` for a decision.
 
 Wakeups use a persisted outbox with at-least-once delivery: a lost receipt can cause duplicates. Codex rechecks authoritative task state and the stable event ID before acting; stale attempts cannot be reviewed. The adapter uses an App-internal pipe observed on Linux App 26.1016.61520 / codex-app-tools 0.1.6, with no public cross-version guarantee. On 2026-10-28, eight offline integration checks passed using the source-built plugin, real systemd 255, MCP, and Bridge workers; the executor and App receiver were fixtures, with no model calls. Real GLM-5.3/max scheduling, same-session continuation, current-App delivery and independent Codex acceptance subsequently passed, including runner recovery, verified-cleanup timeout continuation and running cancellation. The idle-chat new-turn check remains unverified because a new user request resumed the chat before that callback arrived; historical idle wakeup evidence is separate. See the [live validation report](docs/reports/2026-10-28-scheduled-zcode-live-validation.md). See [ADR-010](docs/decisions/ADR-010-scheduled-zcode-and-codex-wakeup.md) and the [interface contract](docs/INTERFACES.md).
 
@@ -140,7 +167,7 @@ Wakeups use a persisted outbox with at-least-once delivery: a lost receipt can c
 - The ZCode Desktop sidebar may not immediately show a new session. The Bridge best-effort syncs the local task index; Desktop controls when the list refreshes.
 - ZCode Start Plan is currently unavailable through the Bridge.
 - Workers have a 10-second cold-start grace window. A worker that never began may be respawned once; an attempt that claimed execution never executes twice. Managers sharing a data root serialize scheduling across processes. Separate data roots do not share a lock; avoid submitting tasks against overlapping execution directories through them.
-- Unverified runtime cleanup reserves the task's execution directory and prevents continuation. Call `zcode_cancel` again to verify cleanup before releasing it. Corrupt records are diagnosed and their known directories remain reserved; an unknown execution scope pauses new scheduling.
+- Unverified runtime cleanup reserves the task's execution directory and prevents continuation. Call `coding_agent_cancel` again to verify cleanup before releasing it. Corrupt records are diagnosed and their known directories remain reserved; an unknown execution scope pauses new scheduling.
 
 ## Security and limitations
 
@@ -153,7 +180,7 @@ Wakeups use a persisted outbox with at-least-once delivery: a lost receipt can c
 
 ## Build from source
 
-See [SHARED_CORE.md](docs/SHARED_CORE.md) for host integration, [ARCHITECTURE.md](docs/ARCHITECTURE.md) for current architecture, and [INTERFACES.md](docs/INTERFACES.md) for contracts. `npm test` uses disposable homes and fake runtimes, including a real worker's 60-second timeout; it does not call a real model or write a real Desktop database. Oversized task prompts and corrupt existing runtime settings fail explicitly. The experimental `zcode_progress_probe` is disabled by default.
+See [SHARED_CORE.md](docs/SHARED_CORE.md) for host integration, [ARCHITECTURE.md](docs/ARCHITECTURE.md) for current architecture, and [INTERFACES.md](docs/INTERFACES.md) for contracts. `npm test` uses disposable homes and fake runtimes, including a real worker's 60-second timeout; it does not call a real model or write a real Desktop database. Oversized task prompts and corrupt existing runtime settings fail explicitly. The experimental `coding_agent_progress_probe` is disabled by default.
 
 The repository includes TypeScript source for review and self-builds. With Node.js 22.18+:
 
